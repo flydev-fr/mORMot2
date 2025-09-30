@@ -60,12 +60,12 @@ type
     function GetTcpTimeoutSec: integer;
     procedure SetTcpTimeoutSec(Seconds: integer);
     // could be overriden to change the behavior of this class
-    procedure PeerCacheStarted(PeerInstance: THttpPeerCache); virtual;
+    procedure PeerCacheStarted({%H-}PeerInstance: THttpPeerCache); virtual;
     procedure PeerCacheStopping; virtual;
-    procedure BeforeClientConnect(var Uri: TUri); virtual;
+    procedure BeforeClientConnect(var {%H-}Uri: TUri); virtual;
     procedure AfterClientConnect; virtual;
-    procedure BeforeClientGet(var Uri: TUri; var WGet: THttpClientSocketWGet); virtual;
-    procedure AfterClientGet(var Uri: TUri; var WGet: THttpClientSocketWGet); virtual;
+    procedure BeforeClientGet(var {%H-}Uri: TUri; var {%H-}WGet: THttpClientSocketWGet); virtual;
+    procedure AfterClientGet(var {%H-}Uri: TUri; var {%H-}WGet: THttpClientSocketWGet); virtual;
   public
     // input parameters (e.g. from command line) for the MGet process
     Silent, NoResume, Cache, Peer, LogSteps, TrackNetwork: boolean;
@@ -173,12 +173,12 @@ end;
 
 function TMGetProcess.GetTcpTimeoutSec: integer;
 begin
-  result := Options.CreateTimeoutMS * 1000;
+  result := Options.CreateTimeoutMS div 1000;
 end;
 
 procedure TMGetProcess.SetTcpTimeoutSec(Seconds: integer);
 begin
-  Options.CreateTimeoutMS := Seconds div 1000;
+  Options.CreateTimeoutMS := Seconds * 1000;
 end;
 
 constructor TMGetProcess.Create;
@@ -205,37 +205,37 @@ begin
   if not Peer then
     exit;
   // first check if the network interface changed
-  if fPeerCache <> nil then
-    if TrackNetwork and
-       fPeerCache.NetworkInterfaceChanged then
-    begin
-      l := Log.Enter(self, 'StartPeerCache: NetworkInterfaceChanged');
-      PeerCacheStopping;
-      fPeerCache := nil; // force re-create just below
-      fPeerCacheInterface := '';
-    end;
-  // (re)create the peer-cache background process if necessary
   if fPeerCache = nil then
+    MacIPAddressFlush // force reload network interfaces from OS API at startup
+  else if TrackNetwork and
+          fPeerCache.NetworkInterfaceChanged then
   begin
-    l := Log.Enter(self, 'StartPeerCache: THttpPeerCache.Create');
-    if (fPeerSecret = '') and
-       (fPeerSecretHexa <> '') then
-      fPeerSecret := HexToBin(fPeerSecretHexa);
-    try
-      peerinstance := THttpPeerCache.Create(fPeerSettings, fPeerSecret,
-        nil, 2, self.Log, @ServerTls, @ClientTls);
-      fPeerCache := peerinstance;
-      fPeerCacheInterface := peerinstance.IpPort;
-      peerinstance.OnDirectOptions := fOnPeerCacheDirectOptions;
-      // THttpAsyncServer could also be tried with rfProgressiveStatic
-      PeerCacheStarted(peerinstance); // may be overriden
-    except
-      // don't disable Peer: we would try on next Execute()
-      on E: Exception do
-        if Assigned(l) then
-          l.Log(sllTrace,
-            'StartPeerCache raised %: will retry next time', [E.ClassType]);
-    end;
+    Log.EnterLocal(l, self, 'StartPeerCache: NetworkInterfaceChanged');
+    PeerCacheStopping;
+    fPeerCache := nil; // force re-create just below
+    fPeerCacheInterface := '';
+    l := nil;
+  end;
+  // (re)create the peer-cache background process if necessary
+  if fPeerCache <> nil then
+    exit;
+  Log.EnterLocal(l, self, 'StartPeerCache: THttpPeerCache.Create');
+  if (fPeerSecret = '') and
+     (fPeerSecretHexa <> '') then
+    fPeerSecret := HexToBin(fPeerSecretHexa);
+  try
+    peerinstance := THttpPeerCache.Create(fPeerSettings, fPeerSecret,
+      nil, 2, self.Log, @ServerTls, @ClientTls);
+    fPeerCache := peerinstance;
+    fPeerCacheInterface := peerinstance.IpPort;
+    peerinstance.OnDirectOptions := fOnPeerCacheDirectOptions;
+    // THttpAsyncServer could also be tried with rfProgressiveStatic
+    PeerCacheStarted(peerinstance); // may be overriden
+  except
+    // don't disable Peer: we would try on next Execute()
+    on E: Exception do
+      Log.Add.Log(sllDebug,
+        'StartPeerCache raised %: will retry next time', [PClass(E)^]);
   end;
 end;
 
@@ -278,7 +278,7 @@ var
   l: ISynLog;
 begin
   // prepare the process
-  l := Log.Enter('Execute %', [Url], self);
+  Log.EnterLocal(l, 'Execute %', [Url], self);
   // (re)start background THttpPeerCache process if needed
   StartPeerCache;
   // identify e.g. 'xxxxxxxxxxxxxxxxxxxx@http://toto.com/res'

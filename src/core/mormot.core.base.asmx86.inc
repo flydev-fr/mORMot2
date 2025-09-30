@@ -156,7 +156,7 @@ end;
 
 {$ifndef FPC_X86} // FPC RTL has fastmove.inc -> our SSE2/ERMS asm is slower
 
-// fast SSE2 version - force define HASNOSSE2 when run any very old CPU
+// fast SSE2 version - force define HASNOSSE2 when run any very old CPU via FPUS
 procedure MoveFast(const src; var dst; cnt: PtrInt);
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
@@ -930,39 +930,21 @@ asm
         and     eax, $3f
 end;
 
-{$ifdef HASNOSSE2} // fallback to simple pascal code if no SSE2 available
+{$ifdef HASNOSSE2} // fallback to simple pascal/i386 code if no SSE2 available
 
 function ByteScanIndex(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
 begin
-  result := 0;
-  if P <> nil then
-    repeat
-      if result >= Count then
-        break;
-      if P^[result] = Value then
-        exit;
-      inc(result);
-    until false;
-  result := -1;
+  result := ByteScanIndexPas(P, Count, Value); // may be the FPC RTL
 end;
 
 function WordScanIndex(P: PWordArray; Count: PtrInt; Value: word): PtrInt;
 begin
-  result := 0;
-  if P <> nil then
-    repeat
-      if result >= Count then
-        break;
-      if P^[result] = Value then
-        exit;
-      inc(result);
-    until false;
-  result := -1;
+  result := WordScanIndexPas(P, Count, Value);
 end;
 
 function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): PtrInt;
 begin
-  result := PtrUInt(IntegerScan(P, Count, Value));
+  result := PtrUInt(IntegerScan(P, Count, Value)); // call pure i386 asm below
   if result = 0 then
     dec(result)
   else
@@ -1314,6 +1296,17 @@ asm
         bswap eax
 end;
 
+procedure bswap32array(a: PCardinalArray; n: PtrInt);
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm     // eax=a, edx=n
+@1:     mov     ecx, dword ptr [eax]
+        bswap   ecx
+        mov     dword ptr [eax], ecx
+        add     eax, 4
+        dec     edx
+        jnz     @1
+end;
+
 function bswap64({$ifdef FPC}constref{$else}const{$endif} a: QWord): QWord;
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
@@ -1502,6 +1495,115 @@ asm
         pop     ebx
         neg     ecx
         lea     eax, [edx + ecx + 1]
+end;
+
+function adler32fast(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        push    ebx
+        push    esi
+        push    edi
+        mov     edi, eax
+        shr     edi, 16
+        movzx   ebx, ax
+        push    ebp
+        mov     esi, edx
+        test    esi, esi
+        mov     ebp, ecx
+        jne     @31
+        mov     eax, 1
+        jmp     @32
+@31:    test    ebp, ebp
+        jbe     @34
+@33:    cmp     ebp, 5552
+        jae     @35
+        mov     eax, ebp
+        jmp     @36
+@35:    mov     eax, 5552
+@36:    sub     ebp, eax
+        cmp     eax, 16
+        jl      @38
+        xor     edx, edx
+        xor     ecx, ecx
+@39:    sub     eax, 16
+        mov     dl, [esi]
+        mov     cl, [esi + 1]
+        add     ebx, edx
+        add     edi, ebx
+        add     ebx, ecx
+        mov     dl, [esi + 2]
+        add     edi, ebx
+        add     ebx, edx
+        mov     cl, [esi + 3]
+        add     edi, ebx
+        add     ebx, ecx
+        mov     dl, [esi + 4]
+        add     edi, ebx
+        add     ebx, edx
+        mov     cl, [esi + 5]
+        add     edi, ebx
+        add     ebx, ecx
+        mov     dl, [esi + 6]
+        add     edi, ebx
+        add     ebx, edx
+        mov     cl, [esi + 7]
+        add     edi, ebx
+        add     ebx, ecx
+        mov     dl, [esi + 8]
+        add     edi, ebx
+        add     ebx, edx
+        mov     cl, [esi + 9]
+        add     edi, ebx
+        add     ebx, ecx
+        mov     dl, [esi + 10]
+        add     edi, ebx
+        add     ebx, edx
+        mov     cl, [esi + 11]
+        add     edi, ebx
+        add     ebx, ecx
+        mov     dl, [esi + 12]
+        add     edi, ebx
+        add     ebx, edx
+        mov     cl, [esi + 13]
+        add     edi, ebx
+        add     ebx, ecx
+        mov     dl, [esi + 14]
+        add     edi, ebx
+        add     ebx, edx
+        mov     cl, [esi + 15]
+        add     edi, ebx
+        add     ebx, ecx
+        add     esi, 16
+        lea     edi, [edi + ebx]
+        cmp     eax, 16
+        jge     @39
+@38:    test    eax, eax
+        je      @42
+@43:    movzx   edx, byte ptr [esi]
+        add     ebx, edx
+        dec     eax
+        lea     esi, [esi + 1]
+        lea     edi, [edi + ebx]
+        jg      @43
+@42:    mov     ecx, 65521
+        mov     eax, ebx
+        xor     edx, edx
+        div     ecx
+        mov     ebx, edx
+        mov     ecx, 65521
+        mov     eax, edi
+        xor     edx, edx
+        div     ecx
+        test    ebp, ebp
+        mov     edi, edx
+        ja      @33
+@34:    mov     eax, edi
+        shl     eax, 16
+        or      eax, ebx
+@32:    pop     ebp
+        pop     edi
+        pop     esi
+        pop     ebx
 end;
 
 function StrComp(Str1, Str2: pointer): PtrInt;
@@ -2199,26 +2301,12 @@ asm
         sub     eax, 11
         mov     [esp+4], eax
         xor     eax, eax
-        lea     ebx, [esp+24H] // reset offsets lookup table
-        {$ifdef HASNOSSE2}
-        mov     ecx, 1024
-@@089I: mov     [ebx], eax
-        mov     [ebx + 4], eax
-        mov     [ebx + 8], eax
-        mov     [ebx + 12], eax
-        add     ebx, 16
-        {$else}
-        pxor    xmm0, xmm0
-        mov     ecx, 256
-@@089I: movups  dqword ptr [ebx], xmm0
-        movups  dqword ptr [ebx + 16], xmm0
-        movups  dqword ptr [ebx + 32], xmm0
-        movups  dqword ptr [ebx + 48], xmm0
-        add     ebx, 64
-        {$endif HASNOSSE2}
-        dec     ecx
-        jnz     @@089I
         mov     [edi], eax
+        lea     edi, [esp+24H] // reset 16KB offsets lookup table using ERMS
+        mov     ecx, 4096
+        cld
+        rep stosd
+        mov     edi, [esp+18H]
         add     edi, 4
         mov     ebx, 1 // ebx=1 shl CWbit
         // main loop:
@@ -2443,12 +2531,14 @@ asm
         pop     esi
 end;
 
-{$ifdef CPU32DELPHI}
+{$ifdef WIN32DELPHI}
 
 // inspired by ValExt_JOH_PAS_8_a by John O'Harrow - calls Delphi System.@Pow10
 function GetExtended(P: PUtf8Char; out err: integer): TSynExtended;
 const
-  Ten: double = 10.0;
+  _Ten:  double = 10.0;
+  _NaN:  double = Nan;
+  _Inf:  double = Infinity;
 asm
         // in: eax=text, edx=@err  out: st(0)=result
         push    ebx                 // save used registers
@@ -2456,7 +2546,6 @@ asm
         push    edi
         mov     esi, eax            // string pointer
         push    eax                 // save for error condition
-        xor     ebx, ebx
         push    eax                 // allocate local storage for loading fpu
         test    esi, esi
         jz      @nil                // nil string
@@ -2465,7 +2554,7 @@ asm
         cmp     bl, ' '
         je      @trim
         xor     ecx, ecx            // clear sign flag
-        fld     qword[Ten]          // load 10 into fpu
+        fld     qword ptr [_Ten]    // load 10.0 into fpu
         xor     eax, eax            // zero number of decimal places
         fldz                        // zero result in fpu
         cmp     bl, '0'
@@ -2495,7 +2584,7 @@ asm
         inc     esi
         jmp     @gdig1
 @frac:  cmp     bl, '.' - '0'
-        jne     @exp                // no decimal point
+        jne     @spec               // no decimal point - maybe Nan/Inf or E
         movzx   ebx, byte ptr [esi] // get next char
         test    bl, bl
         jz      @dotend             // string ends with '.'
@@ -2512,13 +2601,35 @@ asm
         test    bl, bl              // end reached?
         jnz     @fracl              // no, get next digit
         jmp     @finish             // yes, finished (no exponent)
+@spec:  or      bl, $20
+        cmp     bl, 'e' - '0'       // try 'E' or 'e'
+        je      @doexp
+        movzx   eax, word ptr [esi] // next two chars into eax
+        and     eax, $dfdf
+        cmp     bl, 'n' - '0'       // try 'Nan'
+        jne     @speci
+        cmp     eax, $4e41
+        jne     @error
+        lea     eax, [_Nan]         // return Nan constant
+        jmp     @spret
+@speci: cmp     bl, 'i' - '0'       // try 'Inf'
+        jne     @error
+        cmp     eax, $464e
+        jne     @error
+        lea     eax, [_Inf]         // return Infinity constant
+@spret: ffree   st(0)
+        fincstp
+        fld     qword ptr [eax]     // return PDouble(eax)^ constant
+        xor     eax, eax
+        mov     [edx], eax          // result code = 0
+        jmp     @pow                // exit with proper sign flag handling
 @dotend:test    cl, cl              // any digits found before '.'?
         jnz     @finish             // yes, valid
         jmp     @error              // no,invalid
 @exp:   or      bl, $20
         cmp     bl, 'e' - '0'
-        jne     @error              // not 'e' or 'e'
-        movzx   ebx, byte ptr [esi] // get next char
+        jne     @error              // not 'E' nor 'e'
+@doexp: movzx   ebx, byte ptr [esi] // get next char
         inc     esi
         mov     cl, 0               // clear exponent sign flag
         cmp     bl, '-'
@@ -2603,17 +2714,25 @@ asm
 end;
 
 function BSRqword(const q: qword): cardinal;
-asm
-        bsr     eax, [esp + 8]
-        jz      @1
-        add     eax, 32
-        ret
-@1:     bsr     eax, [esp + 4]
-        jnz     @2
-        mov     eax, 255
-@2:
+var
+  c: cardinal; // CPU32 and inlining friendly
+begin
+  c := q shr 32;
+  if c = 0  then
+    result := BsrDword(cardinal(q)) // search in lowest 32-bit
+  else
+    result := BsrDword(c) or 32;   // search in highest 32-bit
 end;
 
-{$endif CPU32DELPHI}
+{$ifndef ISDELPHIXE2}
+function ReturnAddress: pointer;
+// note: mormot.defines.inc made {$W-} so won't overwrite ebp here
+asm
+        // Delphi Win32 generates "push ebp; mov ebp, esp" stack frame prefix
+        // so [ebp + 0] = ebp backup value and [ebp + 4] = caller return address
+        mov     eax, dword ptr [ebp + 4] // mimics the Delphi XE2+ intrinsic
+end;
+{$endif ISDELPHIXE2}
 
+{$endif WIN32DELPHI}
 

@@ -289,7 +289,7 @@ end;
 
 {$ifdef OSWINDOWS}
 
-// SQlite3 is compiled with SQLITE_OMIT_LOCALTIME and SQLITE_NO_THREAD
+// SQLite3 is compiled with SQLITE_OMIT_LOCALTIME and SQLITE_NO_THREAD
 // to ease static linking
 
 function libc_rename(oldname, newname: PUtf8Char): integer; cdecl;
@@ -362,7 +362,7 @@ var
  { as standard C library documentation states:
    Statically allocated buffer, shared by the functions gmtime() and localtime().
    Each call of these functions overwrites the content of this structure.
-   -> this buffer is shared, but SQlite3 will protect it with a mutex :) }
+   -> this buffer is shared, but SQLite3 will protect it with a mutex :) }
    atm: time_t;
 
 function localtime32(t: PCardinal): pointer; cdecl;
@@ -1228,7 +1228,7 @@ asm
         xor     eax, eax
 @@002:  mov     qword ptr [rsp], rax
         mov     qword ptr [rsp+8H], r8
-        movdqu  xmm0, oword ptr [rsp]
+        movups  xmm0, oword ptr [rsp]
         add     rsp, 16
         pop     rbx
         pop     rsi
@@ -1336,7 +1336,7 @@ asm
         mov     qword ptr [r8+8H], 0
 @@002:  mov     qword ptr [rsp], rsi
         mov     qword ptr [rsp+8H], r9
-        movdqu  xmm0, oword ptr [rsp]
+        movups  xmm0, oword ptr [rsp]
         nop
         add     rsp, 24
         pop     rbx
@@ -1505,7 +1505,7 @@ asm
         neg     qword ptr [rsp]
         adc     qword ptr [rsp+8H], 0
         neg     qword ptr [rsp+8H]
-@@005:  movdqu  xmm0, oword ptr [rsp]
+@@005:  movups  xmm0, oword ptr [rsp]
         add     rsp, 16
         pop     rbx
         pop     rsi
@@ -1606,7 +1606,7 @@ asm
 @@001:  xor     r8d, r8d
 @@002:  mov     qword ptr [rsp], r9
         mov     qword ptr [rsp+8H], r8
-        movdqu  xmm0, oword ptr [rsp]
+        movups  xmm0, oword ptr [rsp]
         nop
         add     rsp, 16
         pop     rbx

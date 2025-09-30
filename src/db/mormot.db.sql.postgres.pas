@@ -177,7 +177,7 @@ type
     fPGParamFormats: TIntegerDynArray;
     // non zero for PGFMT_BIN params
     fPGParamLengths: TIntegerDynArray;
-    /// define the result columns name and content
+    /// define the result columns name and content - called once if cached
     procedure BindColumns;
     /// set parameters as expected by PostgresSQL
     procedure BindParams;
@@ -367,7 +367,7 @@ type
   // - allow to execute several statements within an PostgreSQL pipeline, and
   // return the results using asynchronous callbacks from a background thread
   // - inherits from TSynLocked so you can use Lock/UnLock
-  TSqlDBPostgresAsync = class(TSynLocked)
+  TSqlDBPostgresAsync = class(TObjectOSLock)
   protected
     fConnection: TSqlDBPostgresConnection;
     fStatements: array of TSqlDBPostgresAsyncStatement;
@@ -501,7 +501,7 @@ var
   log: ISynLog;
   host, port: RawUtf8;
 begin
-  log := SynDBLog.Enter(self, 'Connect');
+  SynDBLog.EnterLocal(log, self, 'Connect');
   Disconnect; // force fTrans=fError=fServer=fContext=nil
   try
     Split(Properties.ServerName, ':', host, port);
@@ -566,7 +566,7 @@ procedure TSqlDBPostgresConnection.StartTransaction;
 var
   log: ISynLog;
 begin
-  log := SynDBLog.Enter(self, 'StartTransaction');
+  SynDBLog.EnterLocal(log, self, 'StartTransaction');
   if TransactionCount > 0 then
     ESqlDBPostgres.RaiseUtf8('Invalid %.StartTransaction: nested transactions' +
       ' are not supported by Postgres - use SAVEPOINT instead', [self]);
@@ -709,24 +709,24 @@ end;
 procedure TSqlDBPostgresConnectionProperties.FillOidMapping;
 begin
   // see pg_type.h (most used first)
-  MapOid(INT4OID, ftInt64);
-  MapOid(INT8OID, ftInt64);
-  MapOid(TEXTOID, ftUtf8); // other char types will be ftUtf8 as fallback
-  MapOid(FLOAT8OID, ftDouble);
-  MapOid(TIMESTAMPOID, ftDate);
-  MapOid(BYTEAOID, ftBlob);
-  MapOid(NUMERICOID, ftCurrency); // our ORM uses NUMERIC(19,4) for currency
-  MapOid(BOOLOID, ftInt64);
-  MapOid(INT2OID, ftInt64);
-  MapOid(CASHOID, ftCurrency);
+  MapOid(INT4OID,        ftInt64);
+  MapOid(INT8OID,        ftInt64);
+  MapOid(TEXTOID,        ftUtf8); // other char types will be ftUtf8 as fallback
+  MapOid(FLOAT8OID,      ftDouble);
+  MapOid(TIMESTAMPOID,   ftDate);
+  MapOid(BYTEAOID,       ftBlob);
+  MapOid(NUMERICOID,     ftCurrency); // our ORM uses NUMERIC(19,4) for currency
+  MapOid(BOOLOID,        ftInt64);
+  MapOid(INT2OID,        ftInt64);
+  MapOid(CASHOID,        ftCurrency);
   MapOid(TIMESTAMPTZOID, ftDate);
-  MapOid(ABSTIMEOID, ftDate);
-  MapOid(DATEOID, ftDate);
-  MapOid(TIMEOID, ftDate);
-  MapOid(TIMETZOID, ftDate);
-  MapOid(REGPROCOID, ftInt64);
-  MapOid(OIDOID, ftInt64);
-  MapOid(FLOAT4OID, ftDouble);
+  MapOid(ABSTIMEOID,     ftDate);
+  MapOid(DATEOID,        ftDate);
+  MapOid(TIMEOID,        ftDate);
+  MapOid(TIMETZOID,      ftDate);
+  MapOid(REGPROCOID,     ftInt64);
+  MapOid(OIDOID,         ftInt64);
+  MapOid(FLOAT4OID,      ftDouble);
   // note: any other unregistered OID will be handled as ftUtf8 to keep the data
 end;
 
@@ -735,7 +735,7 @@ constructor TSqlDBPostgresConnectionProperties.Create(
 begin
   PostgresLibraryInitialize; // raise an ESqlDBPostgres on loading failure
   if PQ.IsThreadSafe <> 1 then
-    raise ESqlDBPostgres.CreateU('libpq should be compiled in threadsafe mode');
+    ESqlDBPostgres.RaiseU('libpq should be compiled in threadsafe mode');
   fDbms := dPostgreSQL;
   FillOidMapping;
   inherited Create(aServerName, aDatabaseName, aUserID, aPassWord);
@@ -806,6 +806,9 @@ begin
   result := main.fAsync;
 end;
 
+
+{ TSqlDBPostgresStatement }
+
 procedure TSqlDBPostgresStatement.BindColumns;
 var
   nCols, c: integer;
@@ -846,7 +849,7 @@ var
   p: PSqlDBParam;
 begin
   // mark parameter as textual by default, with no blob length
-  FillCharFast(pointer(fPGParams)^, fParamCount shl POINTERSHR, 0);
+  FillCharFast(pointer(fPGParams)^,       fParamCount shl POINTERSHR, 0);
   FillCharFast(pointer(fPGParamFormats)^, fParamCount shl 2, PGFMT_TEXT);
   FillCharFast(pointer(fPGParamLengths)^, fParamCount shl 2, 0);
   // bind fParams[] as expected by PostgreSQL - potentially as array
@@ -986,8 +989,8 @@ begin
   end
   else
     SqlLogEnd;
-  // allocate libpq parameter buffers as dynamic arrays
-  SetLength(fPGParams, fPreparedParamsCount);
+  // allocate libpq parameter buffers as dynamic arrays - reused when cached
+  SetLength(fPGParams,       fPreparedParamsCount);
   SetLength(fPGParamFormats, fPreparedParamsCount);
   SetLength(fPGParamLengths, fPreparedParamsCount);
 end;
@@ -1348,6 +1351,7 @@ end;
 procedure TSqlDBPostgresStatement.ColumnToJson(Col: integer; W: TJsonWriter);
 var
   P: pointer;
+  c: PSqlDBColumnProperty;
 begin
   if (fRes = nil) or
      (fResStatus <> PGRES_TUPLES_OK) or
@@ -1356,24 +1360,24 @@ begin
   P := PQ.GetValue(fRes, fCurrentRow, Col);
   if ((P = nil) or (PUtf8Char(P)^ = #0)) and
      (PQ.GetIsNull(fRes, fCurrentRow, Col) = 1) then
-    W.AddNull
+    W.AddShort4(NULL_LOW)
   else
-  with fColumns[Col] do
   begin
-    case ColumnType of
+    c := @fColumns[Col];
+    case c^.ColumnType of
       ftNull:
         W.AddNull;
       ftInt64,
       ftDouble,
       ftCurrency:
-        if ColumnAttr = BOOLOID then // = PQ.ftype(fRes, Col)
+        if c^.ColumnAttr = BOOLOID then // = PQ.ftype(fRes, Col)
           W.Add((P <> nil) and (PUtf8Char(P)^ = 't'))
         else
           // note: StrLen slightly faster than PQ.GetLength for small content
           W.AddShort(P, StrLen(P));
       ftUtf8:
-        if (ColumnAttr = JSONOID) or
-           (ColumnAttr = JSONBOID) then
+        if (c^.ColumnAttr = JSONOID) or
+           (c^.ColumnAttr = JSONBOID) then
           W.AddShort(P, PQ.GetLength(fRes, fCurrentRow, Col))
         else
         begin
@@ -1398,7 +1402,7 @@ begin
             PQ.GetLength(fRes, fCurrentRow, Col)), {withmagic=}true);
     else
       ESqlDBPostgres.RaiseUtf8('%.ColumnToJson: ColumnType=%?',
-        [self, ord(ColumnType)]);
+        [self, ord(c^.ColumnType)]);
     end;
   end;
 end;
@@ -1479,7 +1483,7 @@ var
 begin
   fProcessing := true;
   SetCurrentThreadName('=%', [fName]);
-  log := SynDBLog.Enter(self, 'Execute');
+  SynDBLog.EnterLocal(log, self, 'Execute');
   try
     repeat
       // notify if needed
@@ -1537,7 +1541,7 @@ begin
           // on fatal DB error don't go any further and notify the callbacks
           if Assigned(log) then
             log.Log(sllWarning, 'Execute: % during %',
-              [E.ClassType, task.Statement.Sql], self);
+              [PClass(E)^, task.Statement.Sql], self);
           if Assigned(task.OnFinished) then
             fOwner.fTasks.Push(task); // task.OnFinished() was never called
           fOwner.DoExecuteAsyncError;
@@ -1546,12 +1550,12 @@ begin
     until Terminated;
   except
     on E: Exception do
-      SynDBLog.Add.Log(sllWarning, 'Execute raised a % -> terminate thread %',
-          [E.ClassType, fName], self);
+      SynDBLog.Add.Log(sllWarning, 'Execute raised % -> terminate thread %',
+        [PClass(E)^, fName], self);
   end;
   fProcessing := false;
   log := nil;
-  SynDBLog.Add.NotifyThreadEnded;
+  SynDBLog.NotifyThreadEnded;
 end;
 
 
@@ -1595,7 +1599,7 @@ end;
 function TSqlDBPostgresAsync.Prepare(const Sql: RawUtf8; ExpectResults: boolean;
   Options: TSqlDBPostgresAsyncStatementOptions): TSqlDBPostgresAsyncStatement;
 var
-  tix, endtix: Int64;
+  tix32, endtix: cardinal;
   i: PtrInt;
 begin
   // initialize the background thread and connection if needed
@@ -1631,10 +1635,10 @@ begin
       Unlock; // there may be some tasks pending in the background thread
     end;
     SleepHiRes(1);
-    tix := GetTickCount64;
+    tix32 := GetTickSec;
     if endtix = 0 then
-      endtix := tix + 5000 // never wait forever
-    else if tix > endtix then
+      endtix := tix32 + 5 // never wait forever
+    else if tix32 > endtix then
       ESqlDBPostgresAsync.RaiseUtf8('%.NewStatement timeout', [self]);
   until false;
   // initialize the new statement within the acquired lock

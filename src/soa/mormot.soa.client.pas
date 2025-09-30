@@ -322,6 +322,7 @@ type
   protected
     fClient: TServiceFactoryClient;
     fRemote: TRest;
+    fAtomicPending: integer;
     fRetryPeriodSeconds: integer;
     procedure InternalExecute; override;
     procedure ProcessPendingNotification;
@@ -374,7 +375,7 @@ begin
     if pending.IDValue = 0 then
     begin
       pendings := GetPendingCountFromDB;
-      fSafe.LockedInt64[0] := pendings;
+      fAtomicPending := pendings;
       if pendings = 0 then
         exit
       else
@@ -382,7 +383,7 @@ begin
           '%.ProcessPendingNotification pending=% with no DB row',
           [self, pendings]);
     end;
-    pendings := fSafe.LockedInt64[0];
+    pendings := fAtomicPending;
     timer.Start;
     _VariantSaveJson(pending.Input, twJsonEscape, params);
     if (params <> '') and
@@ -415,7 +416,7 @@ begin
     pending.Sent := TimeLogNowUtc;
     pending.MicroSec := timer.LastTimeInMicroSec;
     fClient.fSendNotificationsRest.ORM.Update(pending, 'MicroSec,Sent', true);
-    fSafe.LockedInt64Increment(0, -1);
+    LockedDec32(@fAtomicPending);
   finally
     pending.Free;
   end;
@@ -425,11 +426,11 @@ procedure TServiceFactoryClientNotificationThread.InternalExecute;
 var
   delay: integer;
 begin
-  fSafe.LockedInt64[0] := GetPendingCountFromDB;
+  fAtomicPending := GetPendingCountFromDB;
   delay := 50;
   while not Terminated do
   begin
-    while fSafe.LockedInt64[0] > 0 do
+    while fAtomicPending > 0 do
     try
       ProcessPendingNotification;
       delay := 0;
@@ -530,9 +531,10 @@ begin
   else
     notify := nil;
   result := TInterfacedObjectFakeClient.Create(self, Invoke, notify);
-  if not fDelayedInstance and
+  if (not fDelayedInstance) and
      (fInstanceCreation = sicClientDriven) and
-    InternalInvoke(SERVICE_PSEUDO_METHOD[imInstance], '', @id) then
+     // call 'root/InterfaceName._instance_' endpoint
+     InternalInvoke(SERVICE_PSEUDO_METHOD[imInstance], '', @id) then
     // thread-safe initialization of the TInterfacedObjectFakeID
     TInterfacedObjectFakeClient(result).fFakeID := GetCardinal(pointer(id));
 end;
@@ -546,13 +548,17 @@ function TServiceFactoryClient.Invoke(const aMethod: TInterfaceMethod;
   var
     pending: TOrmServiceNotifications;
     input: TDocVariantData;
-    json: RawUtf8;
+    json: TSynTempAdder;
   begin
     pending := fSendNotificationsLogClass.Create;
     try
       pending.Method := aMethod.Uri;
-      json := '[' + aParams + ']';
-      input.InitJsonInPlace(pointer(json), JSON_FAST_EXTENDED);
+      json.Init(length(aParams) + 10);
+      json.AddDirect('[');
+      json.Add(aParams);
+      json.AddDirect(']', #0);
+      pending.SetInput(json.Buffer, aMethod.ArgsInputValuesCount);
+      json.Store.Done;
       pending.Input := variant(input);
       if (aFakeID <> nil) and
          (aFakeID^ <> 0) then
@@ -573,8 +579,8 @@ begin
   begin
     SendNotificationsLog;
     if fSendNotificationsThread <> nil then
-      TServiceFactoryClientNotificationThread(fSendNotificationsThread).
-        Safe.LockedInt64Increment(0, 1);
+      LockedInc32(@TServiceFactoryClientNotificationThread(
+        fSendNotificationsThread).fAtomicPending);
     result := true;
   end
   else
@@ -612,7 +618,7 @@ function TServiceFactoryClient.InternalInvoke(const aMethod: RawUtf8;
   aFakeID: PInterfacedObjectFakeID; aServiceCustomAnswer: PServiceCustomAnswer;
   aClient: TRest): boolean;
 var
-  baseuri, uri, sent, resp, clientDrivenID, head, error, ct: RawUtf8;
+  baseuri, uri, sent, resp, clientDrivenID, head, error: RawUtf8;
   Values: array[0..1] of TValuePUtf8Char;
   status, m: integer;
   service: PInterfaceMethod;
@@ -670,7 +676,7 @@ begin
   if withinput then
     // include non-sensitive input in log
     p := aParams;
-  log := fClient.LogClass.Enter('InternalInvoke I%.%(%) %',
+  fClient.LogClass.EnterLocal(log, 'InternalInvoke I%.%(%) %',
     [fInterfaceUri, aMethod, {%H-}p, clientDrivenID], self);
   // call remote server according to current routing scheme
   if fForcedUri <> '' then
@@ -697,6 +703,13 @@ begin
     aFakeID^ := 0;
     DoClientCall;
   end;
+  // log returned content
+  if (resp <> '') and
+     (sllServiceReturn in fClient.LogLevel) and
+     not (optNoLogOutput in fExecution[m].Options) and
+     ((service = nil) or
+      ([imdOut, imdVar, imdResult] * service^.HasSpiParams = [])) then
+    fClient.InternalLogResponse(resp, 'Invoke');
   // decode result
   if aServiceCustomAnswer = nil then
   begin
@@ -728,14 +741,6 @@ begin
       exit; // leave result=false
     end;
     // decode JSON object
-    if (log <> nil) and
-       (resp <> '') and
-       not (optNoLogOutput in fExecution[m].Options) and
-       ((service = nil) or
-        ([imdConst, imdVar] * service^.HasSpiParams = [])) then
-      with fClient.LogFamily do
-        if sllServiceReturn in Level then
-          log.Log(sllServiceReturn, resp, self, MAX_SIZE_RESPONSE_LOG);
     if fResultAsJsonObject then
     begin
       if aResult <> nil then
@@ -777,19 +782,6 @@ begin
   else
   begin
     // custom answer returned in TServiceCustomAnswer
-    if (log <> nil) and
-       (resp <> '') then
-      with fClient.LogFamily do
-        if sllServiceReturn in Level then
-        begin
-          FindNameValue(head{%H-}, HEADER_CONTENT_TYPE_UPPER, ct);
-          if (resp[1] in ['[', '{', '"']) and
-             IdemPChar(pointer(ct), JSON_CONTENT_TYPE_UPPER) then
-            log.Log(sllServiceReturn, resp, self, MAX_SIZE_RESPONSE_LOG)
-          else
-            log.Log(sllServiceReturn, 'TServiceCustomAnswer=% % len=% %',
-              [status, ct, length(resp), EscapeToShort(resp)], self);
-        end;
     aServiceCustomAnswer^.status := status;
     aServiceCustomAnswer^.Header := head;
     aServiceCustomAnswer^.Content := resp;
@@ -808,7 +800,8 @@ end;
 constructor TServiceFactoryClient.Create(aRest: TRest; aInterface: PRttiInfo;
   aInstanceCreation: TServiceInstanceImplementation; const aContractExpected: RawUtf8);
 var
-  Error, RemoteContract: RawUtf8;
+  err, contract: RawUtf8;
+  cli: TRestClientUri absolute aRest;
 begin
   // extract interface RTTI and create fake interface (and any shared instance)
   if not aRest.InheritsFrom(TRestClientUri) then
@@ -830,21 +823,27 @@ begin
         IInterface(fSharedInstance)._AddRef; // force stay alive
       end;
   end;
-  // check if this interface is supported on the server
+  // check if this interface contract is supported on the server
   if PosEx(SERVICE_CONTRACT_NONE_EXPECTED, ContractExpected) = 0 then
   begin
-    if not InternalInvoke(SERVICE_PSEUDO_METHOD[imContract],
-       TRestClientUri(fClient).ServicePublishOwnInterfaces, @RemoteContract, @Error) then
-      EServiceException.RaiseUtf8('%.Create(): I% interface or % routing not ' +
-        'supported by server [%]', [self, fInterfaceUri,
-         TRestClientUri(fClient).ServicesRouting, Error]);
-    if ('[' + ContractExpected + ']' <> RemoteContract) and
-       ('{"contract":' + ContractExpected + '}' <> RemoteContract) then
+    // call 'root/InterfaceName._contract_' endpoint
+    if InternalInvoke(SERVICE_PSEUDO_METHOD[imContract],
+         cli.ServicePublishOwnInterfaces, @contract, @err) and
+       (contract <> '') then
+      if contract[1] = '[' then
+        contract := copy(contract, 2, length(contract) - 2)
+      else if StartWithExact(contract, '{"contract":"') then
+        contract := copy(contract, 13, length(contract) - 13) else
+    else
+      EServiceException.RaiseUtf8('%.Create(): I% interface or % routing ' +
+        'not supported by this server [%]',
+         [self, fInterfaceUri, cli.ServicesRouting, err]);
+    if contract <> ContractExpected then
       EServiceException.RaiseUtf8('%.Create(): server''s I% contract ' +
         'differs from client''s: expected [%], received % - you may need to ' +
         'upgrade your % client to match % server expectations',
-        [self, fInterfaceUri, ContractExpected, RemoteContract,
-         Executable.Version.DetailedOrVoid, TRestClientUri(fClient).Session.Version]);
+        [self, fInterfaceUri, ContractExpected, contract,
+         Executable.Version.DetailedOrVoid, cli.Session.Version]);
   end;
 end;
 
@@ -957,7 +956,7 @@ begin
   if SendNotificationsPending <> 0 then
     with fClient.LogClass.Enter do
     begin
-      timeOut := GetTickCount64 + aTimeOutSeconds shl MilliSecsPerSecShl;
+      timeOut := GetTickCount64 + aTimeOutSeconds * MilliSecsPerSec;
       repeat
         SleepHiRes(5);
         if SendNotificationsPending = 0 then

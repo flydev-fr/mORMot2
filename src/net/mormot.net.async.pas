@@ -104,10 +104,11 @@ type
     /// low-level 8-bit flags used by the state machine about this connection
     fFlags: TPollAsyncConnectionFlags;
     /// internal 8-bit flags e.g. for fRW[] or IOCP or to mark AddGC()
-    fInternalFlags: set of (ifWriteWait, ifFromGC, ifInGC, ifSeparateWLock);
-    /// the current (reusable) read data buffer of this connection
+    fInternalFlags: set of (
+      ifWriteWait, ifFromGC, ifInGC, ifSeparateWLock, ifProcessing);
+    /// the current (reusable) receiving data buffer of this connection
     fRd: TRawByteStringBuffer;
-    /// the current (reusable) write data buffer of this connection
+    /// the current (reusable) sending data buffer of this connection
     fWr: TRawByteStringBuffer;
     /// re-entrant TryLock/Unlock R/W thread acquisition
     // - by default, a single lock is used for all connection access, but
@@ -276,7 +277,7 @@ type
     fOnFirstRead, fOnStop: TOnPollAsyncProc;
     fWaitingWrite: TPollAsyncConnections; // to implement soWaitWrite
     function GetCount: integer;
-    procedure DoLog(const TextFmt: RawUtf8; const TextArgs: array of const;
+    procedure DoLog(TextFmt: PUtf8Char; const TextArgs: array of const;
       Level: TSynLogLevel = sllTrace);
     // pseError: return false to close socket and connection
     function OnError(connection: TPollAsyncConnection;
@@ -434,7 +435,7 @@ type
     property Owner: TAsyncConnections
       read fOwner;
   published
-    /// the associated remote IP4/IP6, as text
+    /// the associated remote IPv4/IPv6, as text
     property RemoteIP: RawUtf8
       read fRemoteIP;
   end;
@@ -624,7 +625,7 @@ type
     function LockedConnectionDelete(
       aConnection: TAsyncConnection; aIndex: integer): boolean;
     procedure ConnectionAdd(conn: TAsyncConnection);
-    procedure DoLog(Level: TSynLogLevel; const TextFmt: RawUtf8;
+    procedure DoLog(Level: TSynLogLevel; TextFmt: PUtf8Char;
       const TextArgs: array of const; Instance: TObject);
     procedure ProcessIdleTix(Sender: TObject; NowTix: Int64); virtual;
     function ProcessClientStart(Sender: TPollAsyncConnection): boolean;
@@ -693,18 +694,14 @@ type
     /// low-level method to connect a client to this server
     // - is called e.g. from fThreadClients
     function ThreadClientsConnect: TAsyncConnection;
-    /// log some binary data with proper escape
-    // - can be executed from an TAsyncConnection.OnRead method to track content:
-    // $ if acoVerboseLog in Sender.Options then Sender.LogVerbose(self,...);
+    /// log some binary data with proper escape as sllTrace
+    // - can be executed e.g. from an TAsyncConnection.OnRead method as such:
+    // $ if acoVerboseLog in fOwner.Options then
+    // $   fOwner.LogVerbose(self, ..., fRd);
     procedure LogVerbose(connection: TPollAsyncConnection; const ident: RawUtf8;
-      const identargs: array of const; frame: pointer; framelen: integer); overload;
-    /// log some binary data with proper escape
-    // - can be executed from an TAsyncConnection.OnRead method to track content:
-    // $ if acoVerboseLog in Sender.Options then Sender.LogVerbose(...);
-    procedure LogVerbose(connection: TPollAsyncConnection; const ident: RawUtf8;
-      const identargs: array of const; const frame: TRawByteStringBuffer); overload;
+      const identargs: array of const; const data: TRawByteStringBuffer);
     /// the current monotonic time elapsed, evaluated in seconds
-    // - IdleEverySecond will set GetTickCount64 div 1000
+    // - IdleEverySecond will set GetTickCount64 div 1000 = GetTickSec
     property LastOperationSec: TAsyncConnectionSec
       read fLastOperationSec;
     /// allow idle connection to release its internal Connection.rd/wr buffers
@@ -748,7 +745,7 @@ type
     // - as supplied to the constructor, but may be overriden just after startup
     property ConnectionClass: TAsyncConnectionClass
       read fConnectionClass write fConnectionClass;
-    /// direct access to the internal AsyncConnectionsThread`s
+    /// direct access to the internal AsyncConnectionsThread's
     property Threads: TAsyncConnectionsThreads
       read fThreads;
   published
@@ -783,7 +780,7 @@ type
     fExecuteAcceptOnly: boolean; // W in other thread (POSIX THttpAsyncServer)
     fExecuteMessage: RawUtf8;
     fSockPort: RawUtf8;
-    fBanned: THttpAcceptBan; // for hsoBan40xIP
+    fBanned: THttpAcceptBan; // for hsoBan40xIP or BlackList
     procedure OnFirstReadDoTls(Sender: TPollAsyncConnection);
     procedure SetExecuteState(State: THttpServerExecuteState); virtual;
     procedure DoExecute; override;
@@ -900,6 +897,10 @@ type
     fServer: THttpAsyncServer;
     function ReleaseReadMemoryOnIdle: PtrInt; override;
     procedure OnAfterWriteSubscribe; override;
+  public
+    /// low-level access to the associated HTTP async server instance
+    property Server: THttpAsyncServer
+      read fServer;
   end;
 
   /// define the TOnHttpClientAsync callback state machine steps
@@ -977,10 +978,12 @@ type
     procedure BeforeProcessRead; override;
     // redirect to fHttp.ProcessRead()
     function OnRead: TPollAsyncSocketOnReadWrite; override;
-    // DoRequest gathered all output in fWr buffer to be sent at once
-    function FlushPipelinedWrite: TPollAsyncSocketOnReadWrite;
     // redirect to fHttp.ProcessWrite()
     function AfterWrite: TPollAsyncSocketOnReadWrite; override;
+    // DoRequest gathered all output in fWr buffer to be sent at once
+    function FlushPipelinedWrite: TPollAsyncSocketOnReadWrite;
+    // handle ifProcessing flag
+    procedure OnClose; override;
     // quickly reject incorrect requests (payload/timeout/OnBeforeBody)
     function DoReject(status: integer): TPollAsyncSocketOnReadWrite;
     function DecodeHeaders: integer; virtual; // e.g. hfConnectionUpgrade override
@@ -1005,7 +1008,7 @@ type
     procedure SetExecuteState(State: THttpServerExecuteState); override;
     procedure DoExecute; override;
   published
-    /// set if hsoBan40xIP has been defined
+    /// used for hsoBan40xIP has been defined or via Banned.BlackList
     // - indicates e.g. how many accept() have been rejected from their IP
     // - you can customize its behavior once the server is started by resetting
     // its Seconds/Max/WhiteIP properties, before any connections are made
@@ -1493,7 +1496,7 @@ function TPollAsyncConnection.ReleaseWriteMemoryOnIdle: PtrInt;
 begin
   // caller made fRWSafe[0/1].TryLock
   if fWr.Len <> 0 then
-    result := 0
+    result := 0 // the buffer is still in use - wait until fWr.Reset
   else
     result := fWr.Clear;
 end;
@@ -1788,7 +1791,7 @@ begin
     result := {$ifdef USE_WINIOCP} fIocpRecvSend {$else} fRead {$endif}.Count;
 end;
 
-procedure TPollAsyncSockets.DoLog(const TextFmt: RawUtf8;
+procedure TPollAsyncSockets.DoLog(TextFmt: PUtf8Char;
   const TextArgs: array of const; Level: TSynLogLevel);
 begin
   fDebugLog.Add.Log(Level, TextFmt, TextArgs, self);
@@ -1996,12 +1999,12 @@ begin
     if c.IsDangling then
       exit;
     // final acquisition of connection's read+write locks for this thread
-    if (not c.WaitLock({writer=}false, 1000)) or
+    if (not c.WaitLock({writer=}false, 500)) or
        ((ifSeparateWLock in c.fInternalFlags) and
-        (not c.WaitLock({writer=}true, 1000))) then
+        (not c.WaitLock({writer=}true, 500))) then
     begin
-      c.fRWSafe[0].ForceLock; // locks should be available within 1000 ms
-      c.fRWSafe[1].ForceLock
+      c.fRWSafe[0].ForceLock; // locks should be available within 0.5 second
+      c.fRWSafe[1].ForceLock;
     end;
     // call OnClose virtual method once
     if not (fClosed in c.fFlags) then
@@ -2025,7 +2028,7 @@ var
   pse: TPollSocketEvents;
   res: TNetResult;
   start: Int64;
-  wf: string[3];
+  wf: TShort3;
   temp: array[0..$7fff] of byte; // up to 32KB moved to small reusable fRd.Buffer
 begin
   result := true; // if closed or properly read: don't retry
@@ -2313,7 +2316,7 @@ var
 begin
   if fWaitingWrite.Count = 0 then
     exit; // no connection in pending rfProgressiveStatic mode
-  log := fDebugLog.Enter('ProcessWaitingWrite %', [fWaitingWrite.Count], self);
+  fDebugLog.EnterLocal(log, 'ProcessWaitingWrite %', [fWaitingWrite.Count], self);
   with fWaitingWrite do
   begin
     Safe.Lock;
@@ -2419,10 +2422,9 @@ end;
 function TAsyncConnectionsSockets.Write(connection: TPollAsyncConnection;
   data: pointer; datalen: integer; timeout: integer): boolean;
 begin
-  if (fOwner.fLogClass <> nil) and
-     (acoVerboseLog in fOwner.Options) and
+  if (acoVerboseLog in fOwner.Options) and
      not (acoNoLogWrite in fOwner.Options) then
-    fOwner.LogVerbose(TAsyncConnection(connection), 'Write', [], data, datalen);
+   fOwner.fLogClass.Add.LogEscape(sllTrace, 'Write', [], data, datalen, connection);
   result := inherited Write(connection, data, datalen, timeout);
 end;
 
@@ -2636,37 +2638,46 @@ constructor TAsyncConnections.Create(const OnStart, OnStop: TOnNotifyThread;
   aLog: TSynLogClass; aOptions: TAsyncConnectionsOptions; aThreadPoolCount: integer);
 var
   i: PtrInt;
-  tix: Int64;
+  tix32: cardinal;
   opt: TPollAsyncSocketsOptions;
   {%H-}log: ISynLog;
 begin
-  log := aLog.Enter('Create(%,%,%)',
+  aLog.EnterLocal(log, 'Create(%,%,%)',
     [aConnectionClass, ProcessName, aThreadPoolCount], self);
+  // setup connection class
   if (aConnectionClass = TAsyncConnection) or
      (aConnectionClass = nil) then
     EAsyncConnections.RaiseUtf8('Unexpected %.Create(%)',
       [self, aConnectionClass]);
+  fConnectionClass := aConnectionClass;
+  // setup thread pool parameters
   if aThreadPoolCount <= 0 then
     aThreadPoolCount := 1;
-  fLastOperationReleaseMemorySeconds := 60;
-  fLastOperationMS := mormot.core.os.GetTickCount64;
-  fLastOperationSec := Qword(fLastOperationMS) div 1000; // ASAP
-  fKeepConnectionInstanceMS := 100;
-  SetLength(fGC1.Items, 512);
-  SetLength(fGC2.Items, 512);
   {$ifndef USE_WINIOCP}
   fThreadPollingWakeupLoad :=
     (cardinal(aThreadPoolCount) div SystemInfo.dwNumberOfProcessors) * 8;
   if fThreadPollingWakeupLoad < 4 then
     fThreadPollingWakeupLoad := 4; // below 4, the whole algorithm seems pointless
   {$endif USE_WINIOCP}
-  fConnectionClass := aConnectionClass;
+  // setup internal variables
+  fLastOperationReleaseMemorySeconds := 60;
+  fLastOperationMS := mormot.core.os.GetTickCount64;
+  fLastOperationSec := Qword(fLastOperationMS) div 1000; // ASAP
+  fKeepConnectionInstanceMS := 100;
+  SetLength(fGC1.Items, 512);
+  SetLength(fGC2.Items, 512);
+  // setup associated event-driven sockets polling
   opt := [];
   if acoWritePollOnly in aOptions then
     include(opt, paoWritePollOnly);
   fSockets := TAsyncConnectionsSockets.Create(opt, aThreadPoolCount);
   fSockets.fOwner := self;
   fSockets.OnStart := ProcessClientStart;
+  // setup logs
+  if acoVerboseLog in aOptions then
+    if (aLog = nil) or
+       not (sllTrace in aLog.Family.Level) then
+      exclude(aOptions, acoVerboseLog); // no need to check verbose
   if Assigned(aLog) and
      (acoDebugReadWriteLog in aOptions) then
   begin
@@ -2680,8 +2691,8 @@ begin
   end;
   fSockets.fWrite.OnGetOneIdle := ProcessIdleTix;
   {$endif USE_WINIOCP}
-  fOptions := aOptions;
   // prepare this main thread: fThreads[] requires proper fOwner.OnStart/OnStop
+  fOptions := aOptions;
   inherited Create({suspended=}false, OnStart, OnStop, aLog, ProcessName);
   // initiate the read/receive thread(s)
   fThreadPoolCount := aThreadPoolCount;
@@ -2704,12 +2715,14 @@ begin
       fThreads[i] := TAsyncConnectionsThread.Create(self, atpReadPending, i);
   end;
   {$endif USE_WINIOCP}
-  tix := mormot.core.os.GetTickCount64 + 7000;
+  // wait for all threads to be started
+  tix32 := GetTickSec + 7;
   repeat
      if AllThreadsStarted then
        break;
      SleepHiRes(1);
-  until mormot.core.os.GetTickCount64 > tix;
+  until GetTickSec > tix32;
+  // setup custom threads affinity
   if acoThreadCpuAffinity in aOptions then
     SetServerThreadsAffinityPerCpu(log, TThreadDynArray(fThreads))
   else if acoThreadSocketAffinity in aOptions then
@@ -3088,7 +3101,7 @@ begin
 end;
 {$endif USE_WINIOCP}
 
-procedure TAsyncConnections.DoLog(Level: TSynLogLevel; const TextFmt: RawUtf8;
+procedure TAsyncConnections.DoLog(Level: TSynLogLevel; TextFmt: PUtf8Char;
   const TextArgs: array of const; Instance: TObject);
 begin
   if (self <> nil) and
@@ -3488,22 +3501,11 @@ end;
 
 procedure TAsyncConnections.LogVerbose(connection: TPollAsyncConnection;
   const ident: RawUtf8; const identargs: array of const;
-  frame: pointer; framelen: integer);
-var
-  tmp: TLogEscape; // 512 bytes of temp buffer
+  const data: TRawByteStringBuffer);
 begin
-  if (acoVerboseLog in Options) and
-     (fLogClass <> nil) then
-    DoLog(sllTrace, '% len=%%',
-      [FormatToShort(ident, identargs), framelen,
-       LogEscape(frame, framelen, tmp{%H-})], connection);
-end;
-
-procedure TAsyncConnections.LogVerbose(connection: TPollAsyncConnection;
-  const ident: RawUtf8; const identargs: array of const;
-  const frame: TRawByteStringBuffer);
-begin
-  LogVerbose(connection, ident, identargs, frame.Buffer, frame.Len)
+  if acoVerboseLog in Options then
+    fLogClass.Add.LogEscape(
+      sllTrace, ident, identargs, data.Buffer, data.Len, connection);
 end;
 
 procedure TAsyncConnections.IdleEverySecond;
@@ -3616,6 +3618,9 @@ begin
     sec := Qword(NowTix) div 1000; // when 32-bit second resolution is fine
     if sec <> fLastOperationSec then
     begin
+      if sec < fLastOperationSec then // should append once every 136 years :)
+        DoLog(sllError, 'ProcessIdleTix 32-bit overflow: %<%',
+          [sec, fLastOperationSec], self);
       fLastOperationSec := sec;
       IdleEverySecond;
     end;
@@ -3631,16 +3636,14 @@ begin
       DoLog(sllWarning, 'ProcessIdleTix catched %', [E], self);
   end;
   // note: this method should be non-blocking and return quickly
-  // e.g. overriden in TWebSocketAsyncConnections to send pending frames
+  // e.g. overriden in TWebSocketAsyncConnections to send pending frames, or
+  // start a TLoggedWorkThread in THttpServerSocketGeneric.RefreshBlackListUri
 end;
 
 procedure TAsyncConnections.SetOnIdle(
   const aOnIdle: TOnPollSocketsIdle; Remove: boolean);
 begin
-  if Remove then
-    MultiEventRemove(fOnIdle, TMethod(aOnIdle))
-  else
-    MultiEventAdd(fOnIdle, TMethod(aOnIdle));
+  MultiEventSet(fOnIdle, TMethod(aOnIdle), Remove);
 end;
 
 {$ifdef USE_WINIOCP}
@@ -3956,9 +3959,7 @@ begin
         if res = nrRetry then // timeout
           continue;
         // check if the remote IP is banned
-        if (fBanned <> nil) and
-           (fBanned.Count <> 0) and
-           fBanned.IsBanned(sin) then // IP filtering from blacklist
+        if fBanned.IsBanned(sin) then // IP filtering from blacklist
         begin
           if acoVerboseLog in fOptions then
             DoLog(sllTrace, 'Execute: ban=%', [CardinalToHexShort(sin.IP4)], self);
@@ -4142,10 +4143,10 @@ var
   previous: THttpRequestState;
 begin
   // cut-down version of THttpAsyncServerConnection.OnRead
-  if (fOwner.fLogClass <> nil) and
-     (acoVerboseLog in fOwner.Options) and
+  if (acoVerboseLog in fOwner.Options) and
      not (acoNoLogRead in fOwner.Options) then
-    fOwner.LogVerbose(self, 'OnRead %', [HTTP_STATE[fHttp.State]], fRd);
+   fOwner.fLogClass.Add.LogEscape(sllTrace,
+     'OnRead %', [HTTP_STATE[fHttp.State]], fRd.Buffer, fRd.Len, self);
   result := soContinue;
   st.P := fRd.Buffer;
   st.Len := fRd.Len;
@@ -4337,7 +4338,7 @@ begin
         result := nrInvalidParameter;
         exit;
       end;
-      aConnection.fHttp.ContentStream :=
+      aConnection.fHttp.ContentStream := // raise EOSException on invalid h
         TFileStreamEx.CreateFromHandle(h, aDestFileName);
       include(aConnection.fHttp.ResponseFlags, rfContentStreamNeedFree);
     end;
@@ -4472,6 +4473,17 @@ begin
   fWr.Reset; // we could reuse the buffer
 end;
 
+procedure THttpAsyncServerConnection.OnClose;
+begin
+  inherited OnClose; // set fClosed flag
+  if ifProcessing in fInternalFlags then
+  begin
+    exclude(fInternalFlags, ifProcessing); // if not properly done in AfterWrite
+    if Assigned(fServer) then
+      LockedDec32(@fServer.fCurrentProcess);
+  end;
+end;
+
 procedure THttpAsyncServerConnection.BeforeProcessRead;
 var
   endtix: Int64;
@@ -4495,10 +4507,10 @@ var
   st: TProcessParseLine;
   previous: THttpRequestState;
 begin
-  if (fOwner.fLogClass <> nil) and
-     (acoVerboseLog in fOwner.Options) and
+  if (acoVerboseLog in fOwner.Options) and
      not (acoNoLogRead in fOwner.Options) then
-    fOwner.LogVerbose(self, 'OnRead %', [HTTP_STATE[fHttp.State]], fRd);
+    fOwner.fLogClass.Add.LogEscape(sllTrace,
+      'OnRead %', [HTTP_STATE[fHttp.State]], fRd.Buffer, fRd.Len, self);
   result := soClose;
   if (fServer = nil) or
      (fOwner.fSockets = nil) then
@@ -4631,6 +4643,11 @@ begin
     fServer.DoProgressiveRequestFree(fHttp);
   fHttp.ProcessDone;   // ContentStream.Free
   fHttp.Process.Clear; // CompressContentAndFinalizeHead may have allocated it
+  if ifProcessing in fInternalFlags then
+  begin
+    exclude(fInternalFlags, ifProcessing);
+    LockedDec32(@fServer.fCurrentProcess);
+  end;
   if Assigned(fServer.fOnAfterResponse) then
     DoAfterResponse;
   if fHttp.State <> hrsResponseDone then
@@ -4683,6 +4700,14 @@ begin
     result := HTTP_PAYLOADTOOLARGE;
     fServer.IncStat(grOversizedPayload);
   end
+  else if (hsoRejectBotUserAgent in fServer.Options) and
+          (fHttp.UserAgent <> '') and
+          IsHttpUserAgentBot(fHttp.UserAgent) then
+  begin
+    // implement early hsoRejectBotUserAgent detection as 418 I'm a teapot
+    result := HTTP_TEAPOT;
+    fServer.IncStat(grRejected);
+  end
   else if Assigned(fServer.OnBeforeBody) then
     // custom validation (e.g. missing/invalid URL or BearerToken)
     result := fServer.OnBeforeBody(
@@ -4695,31 +4720,36 @@ function THttpAsyncServerConnection.DoReject(
 var
   len: integer; // should not be PtrInt
 begin
-  if fServer.SetRejectInCommandUri(fHttp, fConnectionID, status) then
-    result := soContinue
-  else
-    result := soClose;
-  len := length(fHttp.CommandUri);
-  Send(pointer(fHttp.CommandUri), len); // no polling nor ProcessWrite
-  if result = soContinue then
+  result := soClose;
+  if status = HTTP_TEAPOT then // from hsoRejectBotUserAgent
   begin
-    fServer.IncStat(grWwwAuthenticate);
-    fHttp.State := hrsResponseDone;
-    result := AfterWrite;
+    len := ord(HTTP_BANIP_RESPONSE[0]);
+    Send(@HTTP_BANIP_RESPONSE[1], len); // 418 I'm a teapot
   end
   else
   begin
-    fServer.IncStat(grRejected);
-    fHttp.State := hrsErrorRejected;
-    if (fServer.Async.Banned <> nil) and
-       not IsUrlFavIcon(pointer(fHttp.CommandUri)) and
-       fServer.Async.Banned.ShouldBan(status, fRemoteIP4) then
+    if fServer.ComputeRejectBody(fHttp.Content, fConnectionID, status) then
+      result := soContinue; // for grWwwAuthenticate
+    len := length(fHttp.Content);
+    Send(pointer(fHttp.Content), len); // no polling nor ProcessWrite
+    if result = soContinue then
     begin
-      if acoVerboseLog in fOwner.fOptions then
-        fOwner.DoLog(sllTrace, 'DoReject(%): BanIP(%) %',
-          [status, fRemoteIP, fServer.Async.Banned], self);
-      fServer.IncStat(grBanned);
+      fServer.IncStat(grWwwAuthenticate);
+      fHttp.State := hrsResponseDone;
+      result := AfterWrite;
+      exit;
     end;
+  end;
+  fServer.IncStat(grRejected);
+  fHttp.State := hrsErrorRejected;
+  if (hsoBan40xIP in fServer.Options) and
+     not IsUrlFavIcon(pointer(fHttp.CommandUri)) and
+     fServer.Async.Banned.ShouldBan(status, fRemoteIP4) then
+  begin
+    if acoVerboseLog in fOwner.fOptions then
+      fOwner.DoLog(sllTrace, 'DoReject(%): BanIP(%) %',
+        [status, fRemoteIP, fServer.Async.Banned], self);
+    fServer.IncStat(grBanned);
   end;
 end;
 
@@ -4787,6 +4817,8 @@ begin
   else
     fRequest.Recycle(
       fConnectionID, fReadThread, fHandle, fRequestFlags, GetConnectionOpaque);
+  include(fInternalFlags, ifProcessing);
+  LockedInc32(@fServer.fCurrentProcess);
   fRequest.Prepare(fHttp, fRemoteIP, fServer.fAuthorize);
   // let the associated THttpAsyncServer execute the request
   if fServer.DoRequest(fRequest) then
@@ -4812,7 +4844,8 @@ begin
       include(fHttp.HeaderFlags, hfConnectionClose); // before SetupResponse
     end;
   // trigger optional hsoBan40xIP temporary IP4 bans on unexpected request
-  if fServer.fAsync.Banned.ShouldBan(fRequest.RespStatus, fRemoteIP4) then
+  if (hsoBan40xIP in fServer.Options) and
+     fServer.fAsync.Banned.ShouldBan(fRequest.RespStatus, fRemoteIP4) then
   begin
     fOwner.DoLog(sllTrace, 'DoRequest=%: BanIP(%) %',
       [fRequest.RespStatus, fRemoteIP, fServer.fAsync.Banned], self);
@@ -4905,7 +4938,7 @@ begin
     begin
       fServer.fOnAfterResponse := nil; // won't try again
       fOwner.DoLog(sllWarning,
-        'AfterWrite: OnAfterResponse raised % -> disabled', [E], self);
+        'AfterWrite: OnAfterResponse raised % -> disabled', [PClass(E)^], self);
     end;
   end;
 end;
@@ -4995,8 +5028,7 @@ begin
   fAsync := fConnectionsClass.Create(aPort, OnStart, OnStop,
     fConnectionClass, fProcessName, TSynLog, aco, ServerThreadPoolCount);
   fAsync.fAsyncServer := self;
-  if hsoBan40xIP in ProcessOptions then
-    fAsync.fBanned := THttpAcceptBan.Create;
+  fAsync.fBanned := THttpAcceptBan.Create; // for hsoBan40xIP and BlackList
   // launch this TThread instance
   inherited Create(aPort, OnStart, OnStop, fProcessName,
     ServerThreadPoolCount, KeepAliveTimeOut, ProcessOptions, aLog);
@@ -5136,6 +5168,15 @@ begin
       fInterningTix := tix;
     end;
   end;
+  // BlackListUri regular refresh support
+  if (fBlackListUriNextTix <> 0) and
+     (fAsync.LastOperationSec >= fBlackListUriNextTix) then
+    RefreshBlackListUri(fAsync.LastOperationSec);
+  {$ifdef OSPOSIX}
+  if Assigned(fSspiKeyTab) and
+     fSspiKeyTab.TryRefresh(fAsync.fLastOperationSec) then
+    fAsync.DoLog(sllDebug, 'IdleEverySecond: refreshed %', [fSspiKeyTab], self);
+  {$endif OSPOSIX}
 end;
 
 procedure THttpAsyncServer.AppendHttpDate(var Dest: TRawByteStringBuffer);
@@ -5418,7 +5459,7 @@ var
   tls: TNetTlsContext;
   fav: RawByteString;
 begin
-  log := fLog.Enter('Start %', [fSettings], self);
+  fLog.EnterLocal(log, 'Start %', [fSettings], self);
   if fServer <> nil then
     EHttpProxyServer.RaiseUtf8('Duplicated %.Start', [self]);
   // compute options from settings
@@ -5582,7 +5623,7 @@ begin
   Definition.fHashCached.DeleteDeprecated(tix);
   // supplied URI should be a safe local file
   result := HTTP_NOTFOUND;
-  UrlDecodeVar(Uri.Path.Text, Uri.Path.Len, name, {name=}true);
+  UrlDecodeVar(Uri.Path.Text, Uri.Path.Len, name, {space=}'+');
   NormalizeFileNameU(name);
   if not SafePathNameU(name) then
     exit;

@@ -61,11 +61,11 @@ const
   /// after how many parameters inlining is not worth it
   INLINED_MAX = 10;
 
-  /// the used TAuthSession.IDCardinal value if the session not started yet
+  /// the used TAuthSession.ID value if the session not started yet
   // - i.e. if the session handling is still in its handshaking phase
   CONST_AUTHENTICATION_SESSION_NOT_STARTED = 0;
 
-  /// the used TAuthSession.IDCardinal value if authentication mode is not set
+  /// the used TAuthSession.ID value if authentication mode is not set
   // - i.e. if TRest.HandleAuthentication equals FALSE
   CONST_AUTHENTICATION_NOT_USED = 1;
 
@@ -422,7 +422,6 @@ const
     ooDelete,    // oeDelete
     ooUpdate);   // oeUpdateBlob
 
-
 // backward compatibility types redirections
 {$ifndef PUREMORMOT2}
 
@@ -572,10 +571,10 @@ type
     rmMatchExact,
     rmMatchWithCaseChange);
 
-  /// the kind of SQlite3 (virtual) table
+  /// the kind of SQLite3 (virtual) table
   // - TOrmFts3/4/5 will be associated with vFTS3/vFTS4/vFTS5 values,
   // TOrmRTree/TOrmRTreeInteger with rRTree/rRTreeInteger, any native
-  // SQlite3 table as vSQLite3, and a TOrmVirtualTable*ID as
+  // SQLite3 table as vSQLite3, and a TOrmVirtualTable*ID as
   // rCustomForcedID/rCustomAutoID
   // - a plain TOrm class can be defined as rCustomForcedID (e.g. for
   // TOrmMany) after registration for an external DB via a call to
@@ -959,7 +958,7 @@ type
     // the 'Address_Country' flattened property name
     property NameUnflattened: RawUtf8
       read fNameUnflattened;
-    /// the property index in the RTTI
+    /// the property index in the RTTI, i.e. the index in TFieldBits
     property PropertyIndex: integer
       read fPropertyIndex;
     /// the corresponding column type, as managed by the ORM layer
@@ -1007,7 +1006,7 @@ type
     // - setter method (write Set*) is called if available
     // - if no setter exists (no write declaration), the getted field address is used
     // - handle UTF-8 SQL to Delphi values conversion
-    // - expect BLOB fields encoded as SQlite3 BLOB literals ("x'01234'" e.g.)
+    // - expect BLOB fields encoded as SQLite3 BLOB literals ("x'01234'" e.g.)
     // or Base64 encoded stream for JSON ("\uFFF0base64encodedbinary") - i.e.
     // both format supported by BlobToRawBlob() function
     // - handle TPersistent, TCollection, TRawUtf8List or TStrings with JsonToObject
@@ -1023,7 +1022,7 @@ type
     /// convert the property value into an UTF-8 encoded text
     // - if ToSql is true, result is on SQL form (false->'0' e.g.)
     // - if ToSql is false, result is on JSON form (false->'false' e.g.)
-    // - BLOB field returns SQlite3 BLOB literals ("x'01234'" e.g.) if ToSql is
+    // - BLOB field returns SQLite3 BLOB literals ("x'01234'" e.g.) if ToSql is
     // true, or Base64 encoded stream for JSON ("\uFFF0base64encodedbinary")
     // - getter method (read Get*) is called if available
     // - handle Delphi values into UTF-8 SQL conversion
@@ -1068,14 +1067,14 @@ type
     /// retrieve the property value into a Variant
     // - will set the Variant type to the best matching kind according to the
     // OrmFieldType type
-    // - BLOB field returns SQlite3 BLOB textual literals ("x'01234'" e.g.)
+    // - BLOB field returns SQLite3 BLOB textual literals ("x'01234'" e.g.)
     // - dynamic array field is returned as a variant array
     procedure GetVariant(Instance: TObject; var Dest: Variant); virtual;
     /// set the property value from a Variant value
     // - dynamic array field must be set from a variant array
     // - will set the Variant type to the best matching kind according to the
     // OrmFieldType type
-    // - expect BLOB fields encoded as SQlite3 BLOB literals ("x'01234'" e.g.)
+    // - expect BLOB fields encoded as SQLite3 BLOB literals ("x'01234'" e.g.)
     procedure SetVariant(Instance: TObject; const Source: Variant); virtual;
     /// compare the content of the property of two objects
     // - not all kind of properties are handled: only main types (like GetHash)
@@ -1085,6 +1084,7 @@ type
     // - this default implementation will call GetValueVar() for slow comparison
     function CompareValue(Item1, Item2: TObject; CaseInsensitive: boolean): integer; virtual;
     /// retrieve an unsigned 32-bit hash of the corresponding property
+    // - as used by TRestStorageInMemoryUnique when indexing this property
     // - not all kind of properties are handled: only main types
     // - if CaseInsensitive is TRUE, will apply NormToUpper[] 8-bit uppercase,
     // handling RawUtf8 properties just like the SYSTEMNOCASE collation
@@ -1156,7 +1156,7 @@ type
     /// retrieve the property value into a Variant
     // - will set the Variant type to the best matching kind according to the
     // OrmFieldType type
-    // - BLOB field returns SQlite3 BLOB textual literals ("x'01234'" e.g.)
+    // - BLOB field returns SQLite3 BLOB textual literals ("x'01234'" e.g.)
     // - dynamic array field is returned as a variant array
     procedure GetVariant(Instance: TObject; var Dest: Variant); override;
     /// retrieve the property field offset from RTTI
@@ -2102,11 +2102,12 @@ type
   // - will be fully implemented as TOrmTableJson holding JSON content
   TOrmTableAbstract = class
   protected
-    fRowCount: PtrInt;
-    fFieldCount: PtrInt;
-    fData: TOrmTableDataArray;
+    fRowCount: integer;
+    fFieldCount: integer;
+    fData: TOrmTableDataArray; // 32-bit pointer or fDataStart[] 32-bit offset
     {$ifndef NOPOINTEROFFSET} // reduce memory consumption by half on 64-bit CPU
     fDataStart: PUtf8Char;
+    fDataSafe: TPUtf8CharDynArray; // SetResultsSafe() for TOrmTableWritable
     {$endif NOPOINTEROFFSET}
     {$ifndef NOTORMTABLELEN}
     fLen: TIntegerDynArray;
@@ -2183,8 +2184,6 @@ type
     function GetU(Row: PtrInt; const FieldName: RawUtf8): RawUtf8; overload;
     /// read-only access to a particular field value, as Win Ansi text
     function GetA(Row, Field: PtrInt): WinAnsiString;
-    /// read-only access to a particular field value, as Win Ansi text ShortString
-    function GetS(Row, Field: PtrInt): ShortString;
     /// read-only access to a particular field value, as boolean
     function GetB(Row, Field: PtrInt): boolean;
     /// read-only access to a particular field value, as a Variant
@@ -2681,11 +2680,13 @@ type
     property RowCount: PtrInt
       read GetRowCount;
     /// read-only access to the number of fields for each Row in this table
-    property FieldCount: PtrInt
+    property FieldCount: integer
       read fFieldCount;
     /// raw access to the data values memory pointers
     // - you should rather use the Get*() methods which can use the length
     // - returns the text value, nil for JSON null, or #0 for JSON ""
+    // - setting a value using this property will call SetResultsSafe() which
+    // increase memory consumption on 64-bit targets (but is safe)
     property Results[Offset: PtrInt]: PUtf8Char
       read GetResults write SetResultsSafe;
     /// raw access to the data values UTF-8 length
@@ -2788,8 +2789,8 @@ type
   {$endif USERECORDWITHMETHODS}
   private
     fSafe: TRWLock; // thread-safe and not blocking concurrent IsLocked()
-    fID: TIDDynArray;       // array [0..Count-1] of locked TID
-    fTix: TIntegerDynArray; // GetTickCount64 shr 10 values at the Lock() time
+    fID: TIDDynArray;        // array [0..Count-1] of locked TID
+    fTix: TCardinalDynArray; // GetTickSec values at the Lock() time
     fCount: PtrInt;
     fLastPurge: integer;
   public
@@ -2937,16 +2938,16 @@ type
     fFields: TOrmPropInfoList;
     fSimpleFields: TOrmPropInfoObjArray;
     fCopiableFields: TOrmPropInfoObjArray;
-    fDynArrayFields: TOrmPropInfoRttiDynArrayObjArray;
+    fManyFields: TOrmPropInfoRttiManyObjArray;
     fBlobCustomFields: TOrmPropInfoCustomDynArray;
     fBlobFields: TOrmPropInfoRttiRawBlobDynArray;
     fSqlTableName: RawUtf8;
     fLastFieldsSafe: TLightLock; // topmost to ensure proper aarch64 alignment
-    fSafe: TOSLightLock;
+    fSafe: TOSLightLock; // = TOSLightMutex = SRW lock or direct pthread mutex
     fHasNotSimpleFields: boolean;
     fDynArrayFieldsHasObjArray: boolean;
     fHasTypeFields: TOrmFieldTypes;
-    fManyFields: TOrmPropInfoRttiManyObjArray;
+    fDynArrayFields: TOrmPropInfoRttiDynArrayObjArray;
     fRecordManySourceProp: TOrmPropInfoRttiInstance;
     fRecordManyDestProp: TOrmPropInfoRttiInstance;
     fSqlTableNameUpperWithDot: RawUtf8;
@@ -3064,7 +3065,7 @@ type
     //  adding the specified field
     // - returns something like 'ALTER TABLE tablename ADD COLUMN coldef UNIQUE'
     function SqlAddField(FieldIndex: integer): RawUtf8;
-    /// set a custom SQlite3 text column collation for a specified field
+    /// set a custom SQLite3 text column collation for a specified field
     // - can be used e.g. to override the default COLLATE SYSTEMNOCASE of RawUtf8
     // - collations defined within our mormot.db.raw.sqlite3 unit are the SQLite3
     // standard BINARY, NOCASE, RTRIM and our custom SYSTEMNOCASE, UNICODENOCASE,
@@ -3074,10 +3075,10 @@ type
     // so that it will be common to all database models, for both client and server
     function SetCustomCollation(FieldIndex: integer;
       const aCollationName: RawUtf8): boolean; overload;
-    /// set a custom SQlite3 text column collation for a specified field
+    /// set a custom SQLite3 text column collation for a specified field
     // - overloaded method which expects the field to be named
     function SetCustomCollation(const aFieldName, aCollationName: RawUtf8): boolean; overload;
-    /// set a custom SQlite3 text column collation for a given field type
+    /// set a custom SQLite3 text column collation for a given field type
     // - can be used e.g. to override ALL default COLLATE SYSTEMNOCASE of RawUtf8,
     // or the default COLLATE ISO8601 of TDateTime, and let the generated SQLite3
     // file be available outside the scope of mORMot's SQLite3 engine
@@ -3445,7 +3446,7 @@ function EncodeAsSqlPrepared(const Decoder: TJsonObjectDecoder;
 var
   f: PtrInt;
   W: TJsonWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -3453,7 +3454,7 @@ begin
       ooUpdate:
         begin
           if Decoder.FieldCount = 0 then
-            raise EJsonObjectDecoder.Create('Invalid EncodeAsSqlPrepared(0)');
+            EJsonObjectDecoder.RaiseU('Invalid EncodeAsSqlPrepared(0)');
           W.AddShorter('update ');
           W.AddString(TableName);
           if Decoder.DecodedFieldTypesToUnnest <> nil then
@@ -3463,7 +3464,7 @@ begin
             for f := 0 to Decoder.FieldCount - 1 do
             begin
               W.AddNoJsonEscape(Decoder.DecodedFieldNames^[f]);
-              W.AddShorter('=v.');
+              W.AddDirect('=', 'v', '.');
               W.AddNoJsonEscape(Decoder.DecodedFieldNames^[f]);
               W.AddComma;
             end;
@@ -3473,7 +3474,7 @@ begin
             begin
               W.AddShort(' unnest(?::');
               W.AddShort(PG_FT[Decoder.DecodedFieldTypesToUnnest^[f]]);
-              W.AddShorter('[]),');
+              W.AddDirect('[', ']', ')', ',');
             end;
             W.AddShort(' unnest(?::int8[]) order by '); // last param is ID
             W.AddU(Decoder.FieldCount + 1); // order by ID to mimimize locks wait
@@ -3486,7 +3487,7 @@ begin
             W.AddString(UpdateIDFieldName);
             W.AddShort(') where t.');
             W.AddString(UpdateIDFieldName);
-            W.AddShorter('=v.');
+            W.AddDirect('=', 'v', '.');
             W.AddString(UpdateIDFieldName);
           end
           else
@@ -3497,7 +3498,7 @@ begin
             begin
               // append 'COL1=?,COL2=?'
               W.AddNoJsonEscape(Decoder.DecodedFieldNames^[f]);
-              W.AddShorter('=?,');
+              W.AddDirect('=', '?', ',');
             end;
             W.CancelLastComma;
             W.AddShort(' where ');
@@ -3528,7 +3529,7 @@ begin
               begin
                 W.AddShort('unnest(?::');
                 W.AddShort(PG_FT[Decoder.DecodedFieldTypesToUnnest^[f]]);
-                W.AddShorter('[]),');
+                W.AddDirect('[', ']', ')', ',');
               end
             else
             begin
@@ -3538,7 +3539,7 @@ begin
               begin
                 // INSERT INTO .. VALUES (..),(..),(..),..
                 W.CancelLastComma;
-                W.AddShorter('),(');
+                W.AddDirect(')', ',', '(');
                 W.AddStrings('?,', Decoder.FieldCount);
                 dec(MultiInsertRowCount);
               end;
@@ -4789,6 +4790,8 @@ begin
   IntValue := GetInteger(pointer(Value));
   if Value = '' then
     result := ''
+  else if fOrmFieldType = oftBoolean then // FPC has weird text RTTI for booleans
+    result := Ansi7ToString(BOOL_UTF8[IntValue <> 0])
   else
     result := EnumType^.GetCaption(IntValue);
 end;
@@ -4911,17 +4914,23 @@ begin
 end;
 
 procedure TOrmPropInfoRttiInt64.SetValueInt64(Instance: TObject; V64: Int64);
+var
+  off: PtrUInt;
 begin
-  if fSetterIsFieldPropOffset <> 0 then
-    PInt64(PtrUInt(Instance) + fSetterIsFieldPropOffset)^ := V64
+  off := fSetterIsFieldPropOffset;
+  if off <> 0 then
+    PInt64(PtrUInt(Instance) + off)^ := V64
   else
     fPropInfo.SetInt64Prop(Instance, V64);
 end;
 
 function TOrmPropInfoRttiInt64.GetValueInt64(Instance: TObject): Int64;
+var
+  off: PtrUInt;
 begin
-  if fGetterIsFieldPropOffset <> 0 then
-    result := PInt64(PtrUInt(Instance) + fGetterIsFieldPropOffset)^
+  off := fGetterIsFieldPropOffset;
+  if off <> 0 then
+    result := PInt64(PtrUInt(Instance) + off)^
   else
     result := fPropInfo.GetInt64Prop(Instance);
 end;
@@ -5083,9 +5092,12 @@ begin
 end;
 
 procedure TOrmPropInfoRttiDouble.SetValueDouble(Instance: TObject; V: double);
+var
+  off: PtrUInt;
 begin
-  if fSetterIsFieldPropOffset <> 0 then
-    unaligned(PDouble(PtrUInt(Instance) + fSetterIsFieldPropOffset)^) := V
+  off := fSetterIsFieldPropOffset;
+  if off <> 0 then
+    unaligned(PDouble(PtrUInt(Instance) + off)^) := V
   else
     fPropInfo.SetDoubleProp(Instance, V);
 end;
@@ -5225,9 +5237,12 @@ end;
 
 procedure TOrmPropInfoRttiCurrency.SetValueCurrency(Instance: TObject;
   V: currency);
+var
+  off: PtrUInt;
 begin
-  if fSetterIsFieldPropOffset <> 0 then
-    PCurrency(PtrUInt(Instance) + fSetterIsFieldPropOffset)^ := V
+  off := fSetterIsFieldPropOffset;
+  if off <> 0 then
+    PCurrency(PtrUInt(Instance) + off)^ := V
   else
     fPropInfo.SetCurrencyProp(Instance, V);
 end;
@@ -5456,9 +5471,12 @@ begin
 end;
 
 procedure TOrmPropInfoRttiInstance.SetInstance(Instance, Value: TObject);
+var
+  off: PtrUInt;
 begin
-  if fSetterIsFieldPropOffset <> 0 then
-    PObject(PtrUInt(Instance) + fSetterIsFieldPropOffset)^ := Value
+  off := fSetterIsFieldPropOffset;
+  if off <> 0 then
+    PObject(PtrUInt(Instance) + off)^ := Value
   else
     fPropInfo.SetOrdProp(Instance, PtrInt(Value));
 end;
@@ -5621,13 +5639,15 @@ begin
 end;
 
 procedure TOrmPropInfoRttiAnsi.CopyValue(Source, Dest: TObject);
+var
+  off: PtrUInt;
 begin
-  if fInPlaceCopySameClassPropOffset = 0 then
+  off := fInPlaceCopySameClassPropOffset;
+  if off = 0 then
     fPropInfo.CopyLongStrProp(Source, Dest)
   else
     // avoid temporary variable use, for simple fields with no getter/setter
-    PRawByteString(PtrUInt(Dest) + fInPlaceCopySameClassPropOffset)^ :=
-      PRawByteString(PtrUInt(Source) + fInPlaceCopySameClassPropOffset)^;
+    PRawByteString(PtrUInt(Dest) + off)^ := PRawByteString(PtrUInt(Source) + off)^;
 end;
 
 procedure TOrmPropInfoRttiAnsi.GetBinary(Instance: TObject; W: TBufferWriter);
@@ -5913,9 +5933,12 @@ procedure TOrmPropInfoRttiRawUtf8.SetValue(Instance: TObject; Value: PUtf8Char;
   ValueLen: PtrInt; wasString: boolean);
 var
   tmp: pointer;
+var
+  off: PtrUInt;
 begin
-  if fSetterIsFieldPropOffset <> 0 then
-    FastSetString(PRawUtf8(PtrUInt(Instance) + fSetterIsFieldPropOffset)^, Value, ValueLen)
+  off := fSetterIsFieldPropOffset;
+  if off <> 0 then
+    FastSetString(PRawUtf8(PtrUInt(Instance) + off)^, Value, ValueLen)
   else
   begin
     tmp := nil; // manual initialization/finalization with no hidden try/finally
@@ -6171,7 +6194,7 @@ begin
   W.Add('"');
   fPropInfo.GetWideStrProp(Instance, Value);
   if pointer(Value) <> nil then
-    W.AddJsonEscapeW(pointer(Value), 0);
+    W.AddJsonEscapeW(pointer(Value));
   W.AddDirect('"');
 end;
 
@@ -6287,7 +6310,7 @@ begin
   W.Add('"');
   fPropInfo.GetUnicodeStrProp(Instance, tmp);
   if tmp <> '' then
-    W.AddJsonEscapeW(pointer(tmp), 0);
+    W.AddJsonEscapeW(pointer(tmp));
   W.AddDirect('"');
 end;
 
@@ -6400,7 +6423,7 @@ procedure TOrmPropInfoRttiDynArray.Serialize(Instance: TObject;
   var data: RawByteString; ExtendedJson: boolean);
 var
   da: TDynArray;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   GetDynArray(Instance, da);
   if da.Count = 0 then
@@ -6410,7 +6433,7 @@ begin
     with TJsonWriter.CreateOwnedStream(temp) do
     try
       if ExtendedJson then // smaller content
-        CustomOptions := CustomOptions + [twoForceJsonExtended];
+        CustomOptions := [twoForceJsonExtended];
       AddDynArrayJson(da);
       SetText(RawUtf8(data));
     finally
@@ -6663,9 +6686,11 @@ function TOrmPropInfoRttiVariant.GetHash(Instance: TObject;
   CaseInsensitive: boolean): cardinal;
 var
   value: Variant;
+  max: integer;
 begin
   fPropInfo.GetVariantProp(Instance, value, {byref=}true);
-  result := VariantHash(value, CaseInsensitive);
+  max := 255; // inlined HashVariant/HashVariantI
+  result := VariantHash(OrmHashSeed, value, max, CaseInsensitive, nil);
 end;
 
 procedure TOrmPropInfoRttiVariant.GetJsonValues(Instance: TObject; W: TJsonWriter);
@@ -6713,9 +6738,11 @@ end;
 function TOrmPropInfoRttiVariant.IsValueVoid(Instance: TObject): boolean;
 var
   value: TVarData;
+  off: PtrUInt;
 begin
-  if fGetterIsFieldPropOffset <> 0 then // avoid any temporary variable
-    result := VarIsEmptyOrNull(PVariant(PtrUInt(Instance) + fGetterIsFieldPropOffset)^)
+  off := fGetterIsFieldPropOffset;
+  if off <> 0 then // avoid any temporary variable
+    result := VarIsEmptyOrNull(PVariant(PtrUInt(Instance) + off)^)
   else
   begin
     PCardinal(@value)^ := varEmpty;
@@ -6729,6 +6756,7 @@ function TOrmPropInfoRttiVariant.CompareValue(Item1, Item2: TObject;
   CaseInsensitive: boolean): integer;
 var
   V1, V2: TVarData;
+  off: PtrUInt;
 begin
   if Item1 = Item2 then
     result := 0
@@ -6736,19 +6764,22 @@ begin
     result := -1
   else if Item2 = nil then
     result := 1
-  else if fGetterIsFieldPropOffset <> 0 then // avoid any temporary variable
-    result := FastVarDataComp(
-            PVarData(PtrUInt(Item1) + fGetterIsFieldPropOffset),
-            PVarData(PtrUInt(Item2) + fGetterIsFieldPropOffset), CaseInsensitive)
   else
   begin
-    PCardinal(@V1)^ := varEmpty;
-    PCardinal(@V2)^ := varEmpty;
-    fPropInfo.GetVariantProp(Item1, variant(V1), {byref=}true);
-    fPropInfo.GetVariantProp(Item2, variant(V2), {byref=}true);
-    result := FastVarDataComp(@V1, @V2, CaseInsensitive);
-    VarClearProc(V1);
-    VarClearProc(V2);
+    off := fGetterIsFieldPropOffset;
+    if off <> 0 then // avoid any temporary variable
+      result := FastVarDataComp(PVarData(PtrUInt(Item1) + off),
+                                PVarData(PtrUInt(Item2) + off), CaseInsensitive)
+    else
+    begin
+      PCardinal(@V1)^ := varEmpty;
+      PCardinal(@V2)^ := varEmpty;
+      fPropInfo.GetVariantProp(Item1, variant(V1), {byref=}true);
+      fPropInfo.GetVariantProp(Item2, variant(V2), {byref=}true);
+      result := FastVarDataComp(@V1, @V2, CaseInsensitive);
+      VarClearProc(V1);
+      VarClearProc(V2);
+    end;
   end;
 end;
 
@@ -6785,10 +6816,12 @@ var
   tmp: TSynTempBuffer;
   vd: TSynVarData;
   v: PSynVarData;
+  off: PtrUInt;
 begin
-  if fSetterIsFieldPropOffset <> 0 then
+  off := fSetterIsFieldPropOffset;
+  if off <> 0 then
   begin // direct assignment
-    v := pointer(PtrUInt(Instance) + fSetterIsFieldPropOffset);
+    v := pointer(PtrUInt(Instance) + off);
     VarClear(PVariant(v)^);
   end
   else
@@ -7212,7 +7245,7 @@ procedure TOrmPropInfoCustomJson.GetValueVar(Instance: TObject; ToSql: boolean;
   var result: RawUtf8; wasSqlString: PBoolean);
 var
   W: TJsonWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -7779,7 +7812,7 @@ procedure TOrmPropInfoList.ToCsvText(const Prefix: array of const;
 var
   f: PtrInt;
   W: TJsonWriter; // TJsonWriter.Add(Prefix) so TTextWriter is not enough
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -7914,7 +7947,7 @@ begin
     rkChar,
     rkWChar,
     rkWString:
-      result := oftUtf8Text;
+      result := oftUtf8Text; // UTF-16 content will be handled as UTF-8 JSON
     rkDynArray:
       result := oftBlobDynArray;
     {$ifdef PUBLISHRECORD}
@@ -7972,6 +8005,7 @@ begin
   fData := source.fData;
   {$ifndef NOPOINTEROFFSET}
   fDataStart := source.fDataStart;
+  fDataSafe := source.fDataSafe;
   {$endif NOPOINTEROFFSET}
   {$ifndef NOTORMTABLELEN}
   fLen := source.fLen;
@@ -7987,7 +8021,13 @@ begin
   {$ifdef NOPOINTEROFFSET}
   result := fData[Offset];
   {$else}
-  result := PUtf8Char(PtrInt(fData[Offset]));
+  result := pointer(fDataSafe);
+  if result <> nil then
+  begin
+    result := PPUtf8CharArray(result)[Offset]; // for TOrmTableWritable
+    exit;
+  end;
+  result := PUtf8Char(PtrUInt(fData[Offset]));
   Offset := PtrUInt(fDataStart); // in two steps for better code generation
   if result = nil then
     Offset := PtrInt(result); // compile as branchless cmove on FPC
@@ -8024,11 +8064,29 @@ begin
   {$else}
   if Value <> nil then
     dec(Value, PtrUInt(fDataStart));
-  fData[Offset] := PtrInt(Value);
+  fData[Offset] := PtrUInt(Value); // we assume fDataSafe = nil
   {$endif NOPOINTEROFFSET}
 end;
 
+{$ifndef NOPOINTEROFFSET}
+procedure FillSafe(s: PInteger; d: PPUtf8Char; start: PUtf8Char; n: PtrInt);
+begin
+  if s <> nil then
+    repeat
+      if s^ <> 0 then
+        d^ := start + s^; // pointer to the existing data
+      inc(s);
+      inc(d);
+      dec(n);
+    until n = 0;
+end;
+{$endif NOPOINTEROFFSET}
+
 procedure TOrmTableAbstract.SetResultsSafe(Offset: PtrInt; Value: PUtf8Char);
+{$ifndef NOPOINTEROFFSET}
+var
+  n: PtrInt;
+{$endif NOPOINTEROFFSET}
 begin
   {$ifndef NOTORMTABLELEN}
   if fLen <> nil then
@@ -8037,20 +8095,17 @@ begin
   {$ifdef NOPOINTEROFFSET}
   fData[Offset] := Value;
   {$else}
-  if Value <> nil then
+  n := length(fDataSafe); // use pointers in fDataSafe[] not offsets in fData[]
+  if n = 0 then
   begin
-    dec(Value, PtrUInt(fDataStart));
-    if (PtrInt(PtrUInt(Value)) > MaxInt) or
-       (PtrInt(PtrUInt(Value)) < -MaxInt) then
-      EOrmTable.RaiseUtf8('%.Results[%] set overflow: all PUtf8Char ' +
-        'should be in a [-2GB..+2GB] 32-bit range (value=% start=%) - ' +
-        'consider forcing NOPOINTEROFFSET conditional for your project'
-        // FPCMM_MEDIUM32BIT may be incompatible with TOrmTable for data >256KB
-        // so may require NOPOINTEROFFSET conditional, so is not set by default
-        {$ifdef FPCMM_MEDIUM32BIT} + ' or disable FPCMM_MEDIUM32BIT' {$endif},
-        [self, Offset, pointer(Value), pointer(fDataStart)]);
-  end;
-  fData[Offset] := PtrInt(Value);
+    n := (fRowCount + 1) * fFieldCount; // first row = field names
+    SetLength(fDataSafe, NextGrow(n));  // initial allocation
+    FillSafe(pointer(fData), pointer(fDataSafe), fDataStart, n); // convert
+    fData := nil; // will use fDataSafe[] pointers from now on
+  end
+  else if Offset >= n then
+    SetLength(fDataSafe, NextGrow(Offset));
+  fDataSafe[Offset] := Value;
   {$endif NOPOINTEROFFSET}
 end;
 
@@ -8070,7 +8125,6 @@ var
   up: PNormTableByte;
 begin
   if (self <> nil) and
-     (fData <> nil) and
      (FieldName <> nil) and
      (fFieldCount > 0) then
     if IsRowID(FieldName) then
@@ -8244,9 +8298,15 @@ begin
     exit; // out of range
   if Row < fRowCount then
   begin
-    Row := Row * FieldCount; // convert row index into position in fData[Offset]
-    MoveFast(fData[Row + FieldCount], fData[Row],
-      (fRowCount * FieldCount - Row) * SizeOf(fData[Row]));
+    Row := Row * FieldCount; // convert row index into offset in fData(Safe)[]
+    {$ifndef NOPOINTEROFFSET}
+    if fDataSafe <> nil then
+      MoveFast(fDataSafe[Row + FieldCount], fDataSafe[Row],
+        (fRowCount * FieldCount - Row) * SizeOf(fDataSafe[Row]))
+    else
+    {$endif NOPOINTEROFFSET}
+      MoveFast(fData[Row + FieldCount], fData[Row],
+        (fRowCount * FieldCount - Row) * SizeOf(fData[Row]));
   end;
   dec(fRowCount);
   result := true;
@@ -8630,7 +8690,6 @@ end;
 function TOrmTableAbstract.GetID(Row: PtrInt): TID;
 begin
   if (self = nil) or
-     (fData = nil) or
      (fFieldIndexID < 0) or
      (PtrUInt(Row) > PtrUInt(fRowCount)) then
     result := 0
@@ -8641,7 +8700,6 @@ end;
 function TOrmTableAbstract.Get(Row, Field: PtrInt): PUtf8Char;
 begin
   if (self = nil) or
-     (fData = nil) or
      (PtrUInt(Row) > PtrUInt(fRowCount)) or
      (PtrUInt(Field) >= PtrUInt(fFieldCount)) then
     result := nil
@@ -8653,24 +8711,15 @@ function TOrmTableAbstract.GetWithLen(Row, Field: PtrInt; out Len: integer): PUt
 begin
   if (self = nil) or
      (PtrUInt(Row) > PtrUInt(fRowCount)) or
-     (PtrUInt(Field) >= PtrUInt(fFieldCount)) or
-     (fData = nil) then
+     (PtrUInt(Field) >= PtrUInt(fFieldCount)) then
   begin
     Len := 0;
     result := nil;
   end
   else
   begin
-    inc(Field, Row * fFieldCount);
-    {$ifdef NOPOINTEROFFSET} // inlined GetResults() for Delphi 7
-    result := fData[Field];
-    {$else}
-    result := PUtf8Char(PtrInt(fData[Field]));
-    Row := PtrUInt(fDataStart); // in two steps for better code generation
-    if result = nil then
-      Row := PtrInt(result); // compile as branchless cmove on FPC
-    inc(result, Row);
-    {$endif NOPOINTEROFFSET}
+    inc(Field, Row * fFieldCount); // now Field = Offset in fData(Safe)[]
+    result := GetResults(Field);
     {$ifdef NOTORMTABLELEN}
     Len := StrLen(result);
     {$else}
@@ -8770,7 +8819,7 @@ begin
         result := UnixTimeToDateTime(GetInt64(P));
       oftUnixMSTime:
         result := UnixMSTimeToDateTime(GetInt64(P));
-    else // oftDateTime and any other kind will try from ISO-8601 text
+    else // oftDateTime and any other kind will try f²rom ISO-8601 text
       result := Iso8601ToDateTimePUtf8Char(P);
     end;
 end;
@@ -8778,11 +8827,6 @@ end;
 function TOrmTableAbstract.GetAsDateTime(Row: PtrInt; const FieldName: RawUtf8): TDateTime;
 begin
   result := GetAsDateTime(Row, FieldIndex(FieldName));
-end;
-
-function TOrmTableAbstract.GetS(Row, Field: PtrInt): ShortString;
-begin
-  Utf8ToShortString(result, Get(Row, Field));
 end;
 
 function TOrmTableAbstract.GetB(Row, Field: PtrInt): boolean;
@@ -9021,7 +9065,7 @@ begin
     begin
       U := GetResults(o);
       if W.Expand then
-        W.AddString(W.ColNames[f]); // '"'+ColNames[]+'":'
+        W.AddString(W.ColNames[f]); // '"' + ColNames[] + '":'
       if Assigned(OnExportValue) then
         W.AddString(OnExportValue(self, r, f, false))
       else if (IDBinarySize > 0) and
@@ -9072,7 +9116,7 @@ procedure TOrmTableAbstract.GetJsonValues(Json: TStream; Expand: boolean;
   RowFirst, RowLast: PtrInt; IDBinarySize: integer);
 var
   W: TResultsWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TResultsWriter.Create(Json, Expand, false, nil, 0, @tmp);
   try
@@ -9122,7 +9166,7 @@ begin
   W := TTextWriter.Create(Dest, @temp, SizeOf(temp));
   try
     if AddBOM then
-      W.AddShorter(#$ef#$bb#$bf); // add UTF-8 Byte Order Mark
+      W.AddDirect(#$ef, #$bb, #$bf); // add UTF-8 Byte Order Mark
     if Tab then
       CommaSep := #9;
     FMax := FieldCount - 1;
@@ -9314,7 +9358,7 @@ begin
         W.AddShort(XMLUTF8_HEADER);
         W.AddString(ODSContentHeader);
         W.Add(FieldCount);
-        W.AddShorter('" />');
+        W.AddDirect('"', ' ', '/', '>');
         if (self <> nil) and
            ((FieldCount > 0) or
             (fRowCount > 0)) then
@@ -9341,13 +9385,13 @@ begin
                     begin
                       W.AddShort('float" office:value="');
                       W.AddXmlEscape(U);
-                      W.AddShorter('" />');
+                      W.AddDirect('"', ' ', '/', '>');
                     end;
                   ftDate:
                     begin
                       W.AddShort('date" office:date-value="');
                       W.AddXmlEscape(U);
-                      W.AddShorter('" />');
+                      W.AddDirect('"', ' ', '/', '>');
                     end;
                 else
                   begin
@@ -9394,13 +9438,13 @@ begin
   o := 0;
   for r := 0 to fRowCount do
   begin
-    Dest.AddShorter('<tr>');
+    Dest.AddDirect('<', 't', 'r', '>');
     for f := 0 to fFieldCount - 1 do
     begin
       if r = 0 then
-        Dest.AddShorter('<th>') // header
+        Dest.AddDirect('<', 't', 'h', '>') // header
       else
-        Dest.AddShorter('<td>');
+        Dest.AddDirect('<', 't', 'd', '>');
       if Assigned(OnExportValue) and
          (r > 0) then
         Dest.AddHtmlEscapeUtf8(OnExportValue(self, r, f, true), hfOutsideAttributes)
@@ -9420,7 +9464,7 @@ end;
 function TOrmTableAbstract.GetHtmlTable(const Header: RawUtf8): RawUtf8;
 var
   W: TJsonWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -9710,6 +9754,8 @@ begin
   quicksort.Len := pointer(fLen);
   {$endif NOTORMTABLELEN}
   {$ifndef NOPOINTEROFFSET}
+  if fDataSafe <> nil then
+    EOrmTable.RaiseUtf8('%.SortFields not allowed after write', [self]);
   quicksort.DataStart := fDataStart;
   {$endif NOPOINTEROFFSET}
   if fFieldIndexID < 0 then // consummed as OffsetID = OffsetField - OField2ID
@@ -9889,6 +9935,8 @@ begin
   quicksort.Len := pointer(fLen);
   {$endif NOTORMTABLELEN}
   {$ifndef NOPOINTEROFFSET}
+  if fDataSafe <> nil then
+    EOrmTable.RaiseUtf8('%.SortFields not allowed after SetResultSafe', [self]);
   quicksort.DataStart := fDataStart;
   {$endif NOPOINTEROFFSET}
   quicksort.FieldCount := FieldCount;
@@ -9941,6 +9989,10 @@ begin
      (FieldCount <= 0) then
     exit;
   // move fData[] in two passes: rows with bit set, then rows with bit unset
+  {$ifndef NOPOINTEROFFSET}
+  if fDataSafe <> nil then
+    EOrmTable.RaiseUtf8('%.SortBitsFirst after write', [self]);
+  {$endif NOPOINTEROFFSET}
   n := fRowCount * FieldCount;
   SetLength(old, n);
   d := @fData[FieldCount]; // ignore first row = header
@@ -10214,8 +10266,7 @@ end;
 function TOrmTableAbstract.FieldLengthMean(Field: PtrInt): cardinal;
 begin
   if (self = nil) or
-     (PtrUInt(Field) >= PtrUInt(fFieldCount)) or
-     (fData = nil) then
+     (PtrUInt(Field) >= PtrUInt(fFieldCount)) then
     result := 0
   else
   begin
@@ -10483,7 +10534,7 @@ begin
   end
   else
   begin
-    if Source.VType <> VarType then
+    if cardinal(Source.VType) <> cardinal(VarType) then
       RaiseCastError;
     r := TOrmTableRowVariantData(Source).VRow;
     if r < 0 then
@@ -10522,7 +10573,7 @@ procedure TOrmTableRowVariant.Iterate(var Dest: TVarData;
   const V: TVarData; Index: integer);
 begin
   if cardinal(Index) < cardinal(TOrmTableRowVariantData(V).VTable.fRowCount) then
-    Dest := V
+    TOrmTableRowVariantData(V).VTable.ToDocVariant(Index, PVariant(@Dest)^)
   else
     TSynVarData(Dest).VType := varEmpty;
 end;
@@ -10568,7 +10619,7 @@ begin
         n := fCount;
       end;
       fID[n] := aID;
-      fTix[n] := GetTickCount64 shr MilliSecsPerSecShl;
+      fTix[n] := GetTickSec;
       inc(fCount);
     finally
       fSafe.WriteUnLock;
@@ -10653,22 +10704,22 @@ begin
      (fCount = 0) or
      (MinutesFromNow = 0) then
     exit; // nothing to purge
-  old := GetTickCount64 shr MilliSecsPerSecShl; // as seconds
+  old := GetTickSec;
   if old - fLastPurge < 60 then
     exit; // no need to purge more than once per minute
   fLastPurge := old;
-  dec(old, MinutesFromNow * 60);
+  dec(old, cardinal(MinutesFromNow) * 60);
   if old <= 0 then
     exit; // this computer just started
   fSafe.WriteLock;
   try
     n := 0;
     for i := 0 to fCount - 1 do // brute force is fast enough every minute
-      if fTix[i] >= old then
+      if fTix[i] >= cardinal(old) then
       begin
         if n <> i then
         begin
-          fID[n] := fID[i];
+          fID[n]  := fID[i]; // in-place purge
           fTix[n] := fTix[i];
         end;
         inc(n);
@@ -11218,7 +11269,7 @@ var
   W: TTextWriter;
   Start: PUtf8Char;
   info: TGetJsonField;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   info.Json := P;
   if info.Json = nil then
@@ -11241,7 +11292,7 @@ begin
   W := TTextWriter.CreateOwnedStream(temp);
   try
     if sfoExtendedJson in Format then
-      W.CustomOptions := W.CustomOptions + [twoForceJsonExtended];
+      W.CustomOptions := [twoForceJsonExtended];
     W.AddDirect('{');
     if (decoded <> 0) and
        (sfoPutIDFirst in Format) then
@@ -11328,25 +11379,12 @@ begin
 end;
 
 const
-  FUNCS: array[0..6] of PAnsiChar = (
-    'MAX(',         // 0
-    'MIN(',         // 1
-    'AVG(',         // 2
-    'SUM(',         // 3
-    'JSONGET(',     // 4
-    'JSONHAS(',     // 5
-    nil);
+  FUNCS = 'MAX(|MIN(|AVG(|SUM(|JSONGET(|JSONHAS(|';
 
 function IsSqlFunction(P: PUtf8Char): boolean;
 begin
-  case IdemPPChar(P, @FUNCS) of
-    0..3:
-      result := PosChar(P + 4, ')') <> nil;
-    4..5:
-      result := PosChar(P + 8, ')') <> nil;
-  else
-    result := false;
-  end;
+  result := (IdemPCharSep(P, FUNCS) >= 0) and
+            (PosChar(P + 4, ')') <> nil);
 end;
 
 function TOrmPropertiesAbstract.IsFieldNameOrFunction(const PropName: RawUtf8): boolean;
@@ -11363,7 +11401,7 @@ begin
   P := pointer(PropName);
   if P[L - 1] = ')' then
   begin
-    case IdemPPChar(P, @FUNCS) of
+    case IdemPCharSep(P, FUNCS) of
       0..3:
         begin
           inc(P, 4);
@@ -11683,7 +11721,8 @@ procedure InitializeUnit;
 var
   ptc: TRttiParserComplexType;
 begin
-  OrmHashSeed := Random32Not0; // avoid hash flooding
+  // in-memory hashing are seeded from random to avoid hash flooding
+  OrmHashSeed := SystemEntropy.Startup.c1;
   // manual set of OrmFieldTypeComp[] which are not exact TUtf8Compare match
   pointer(@OrmFieldTypeComp[oftAnsiText])   := @AnsiIComp;
   pointer(@OrmFieldTypeComp[oftUtf8Custom]) := @AnsiIComp;

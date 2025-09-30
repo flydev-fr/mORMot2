@@ -59,7 +59,7 @@ type
 
   /// a generic REpresentational State Transfer (REST) ORM server
   // - inherit to provide its main storage capabilities, e.g. our in-memory
-  // engine for TRestOrmServerFullMemory or SQlite3 for TRestOrmServerDB
+  // engine for TRestOrmServerFullMemory or SQLite3 for TRestOrmServerDB
   // - is able to register and redirect some TOrm classes to their own
   // dedicated TRestStorage
   TRestOrmServer = class(TRestOrm, IRestOrmServer)
@@ -897,7 +897,7 @@ var
   status: integer;
   {%H-}log: ISynLog;
 begin
-  log := fRest.LogClass.Enter('RecordVersionSynchronizeSlave %', [Table], self);
+  fRest.LogClass.EnterLocal(log, 'RecordVersionSynchronizeSlave %', [Table], self);
   t := fModel.GetTableIndexExisting(Table);
   result := -1; // error
   if (PtrUInt(length(fRecordVersionMax)) <= t) or
@@ -964,7 +964,7 @@ var
   opt: TRestBatchOptions;
   {%H-}log: ISynLog;
 begin
-  log := fRest.LogClass.Enter(
+  fRest.LogClass.EnterLocal(log,
     'RecordVersionSynchronizeSlaveToBatch % vers=% maxrow=%',
     [Table, RecordVersion, MaxRowLimit], self);
   result := nil;
@@ -1306,7 +1306,7 @@ var
   T: TOrmTable;
   {%H-}log: ISynLog;
 begin
-  log := fRest.LogClass.Enter('TrackChangesFlush(%)', [aTableHistory], self);
+  fRest.LogClass.EnterLocal(log, 'TrackChangesFlush(%)', [aTableHistory], self);
   if (aTableHistory = nil) or
      not aTableHistory.InheritsFrom(TOrmHistory) then
     EOrmException.RaiseUtf8('%.TrackChangesFlush: % is not a TOrmHistory',
@@ -1522,7 +1522,7 @@ begin
       if result <> nil then
         if result.InheritsFrom(TRestStorage) and
            not TRestStorage(result).AdaptSqlForEngineList(SQL) then
-          // complex request will use SQlite3 virtual engine module
+          // complex request will use SQLite3 virtual engine module
           result := nil;
     end;
   end;
@@ -1541,7 +1541,7 @@ begin
     result := Rest.EngineList(TableIndex, aSql)
   else
     // complex TOrmVirtualTableJson/External queries will rely on virtual table
-    result := MainEngineList(SQL, false, nil);
+    result := MainEngineList(SQL, {ajax=}false, nil);
   if result = '[]'#$A then
     result := '';
 end;
@@ -1951,7 +1951,7 @@ begin
   fOrm := aRest;
   fTable := aTable;
   fData := aData;
-  fUriContext := ServiceRunningRequest;
+  fUriContext := ServiceRunningRequest; // access the threadvar once
   fRunningBatchEncoding := encPost;
   fRunTableIndex := -1;
 end;
@@ -2024,7 +2024,7 @@ begin
      (fRunStatic = nil) and
      fOrm.InternalBatchStart(fEncoding, fBatchOptions) then
   begin
-    fRunningBatchRest := fOrm; // e.g. multi-insert in main SQlite3 engine
+    fRunningBatchRest := fOrm; // e.g. multi-insert in main SQLite3 engine
     fRunningBatchTable := fRunTable;
     fRunningBatchEncoding := fEncoding;
   end;
@@ -2087,7 +2087,7 @@ begin
       fRunningRest := fRunStatic;
     include(fFlags, fNeedAcquireExecutionWrite); // default paranoid thread-safe
     // retrieve fCommandEncoding/fValueDirectFields
-    case PWord(fCommand)^ of // enough to check the first 2 chars
+    case cardinal(PWord(fCommand)^) of // enough to check the first 2 chars
       ord('P') + ord('O') shl 8:
         // {"Table":[...,"POST",{object},...]} [...,"POST@Table",{object},...]
         fCommandEncoding := encPost;
@@ -2431,7 +2431,7 @@ begin
     [fTable, length(fData)], self);
   //log.Log(sllCustom2, Data, self, 100 shl 10);
   if Assigned(fLog) then // nil if fOrm.LogClass=nil or sllEnter is not enabled
-    fTimer.Start(fLog.Instance.LastQueryPerformanceMicroSeconds); // for DoLog
+    fTimer.Start; // for DoLog
   ParseHeader;
   // try..except to intercept any error
   try

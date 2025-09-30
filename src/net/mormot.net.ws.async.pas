@@ -79,6 +79,9 @@ type
     /// delayed process of outgoing WebSockets framing protocol
     // - will notify TWebSocketAsyncConnections.ProcessIdleTix sending
     procedure SendFrameAsync(const Frame: TWebSocketFrame); override;
+    /// low level access to the associated async connection instance
+    property Connection: TWebSocketAsyncConnection
+      read fConnection;
   end;
 
   /// meta-class of non-blocking WebSockets process as used on server side
@@ -274,11 +277,11 @@ function TWebSocketAsyncConnection.OnLastOperationIdle(
 var
   delaysec: TAsyncConnectionSec; // HeartbeatDelay may be changed on the fly
 begin
-  // this code is not blocking and very quick most of the time
+  // this code is run at most every second, very quick most of the time
   result := false;
-  delaysec := TWebSocketAsyncServer(fServer).
-    fSettings.HeartbeatDelay shr MilliSecsPerSecShl;
-  if nowsec < delaysec + fLastOperation then
+  delaysec := TWebSocketAsyncServer(fServer).fSettings.HeartbeatDelay;
+  if (delaysec = 0) or
+     (nowsec - fLastOperation < delaysec div MilliSecsPerSec) then
     exit; // nothing to send (most common case)
   // it is time to notify the other end that we are still alive
   fProcess.SendPing; // Write will change fWasActive, then fLastOperation
@@ -348,7 +351,7 @@ end;
 
 procedure TWebSocketAsyncConnection.OnClose;
 begin
-  inherited OnClose; // set fClosed flag
+  inherited OnClose; // set fClosed flag and check ifProcessing
   if fProcess = nil then
     exit;
   fProcess.Shutdown({waitforpong=}true); // send focConnectionClose
@@ -412,7 +415,7 @@ var
 begin
   start := 0;
   elapsed := 0;
-  if fLog.HasLevel([sllTrace]) then
+  if fLogClass.HasLevel([sllTrace]) then
     QueryPerformanceMicroSeconds(start); // we monitor frame sending timing
   fOutgoingSafe.Lock;
   try
@@ -626,7 +629,7 @@ var
   n: integer;
   log: ISynLog;
 begin
-  log := TSynLog.Enter(self, 'Destroy');
+  TSynLog.EnterLocal(log, self, 'Destroy');
   // notify at once all client connections - don't wait for answer
   closing.opcode := focConnectionClose;
   closing.content := [];

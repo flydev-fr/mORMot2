@@ -49,7 +49,7 @@ type
     {$ifdef OSWINDOWS}
     fServiceDependencies: RawUtf8;
     {$endif OSWINDOWS}
-    fLog: TSynLogLevels;
+    fLog: TSynLogLevels; // 32-bit
     fLogRotateFileCount: integer;
     fLogPath: TFileName;
     fLogClass: TSynLogClass;
@@ -482,7 +482,7 @@ var
     else
     begin
       error := GetLastError;
-      FormatUtf8('Error % [%] occurred with', [error, GetErrorText(error)], msg);
+      FormatUtf8('Error % [%] occurred with', [error, GetErrorShort(error)], msg);
       cc := ccLightRed;
       ExitCode := 1; // notify error to caller batch
     end;
@@ -627,7 +627,7 @@ begin
             Executable.ProgramName, ' killed successfully']);
       end
       else
-        raise EDaemon.Create('No forked process found to be killed');
+        EDaemon.RaiseU('No forked process found to be killed');
     cState:
       ShowState(RunUntilSigTerminatedState);
     else

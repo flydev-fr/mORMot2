@@ -172,7 +172,7 @@ begin
   fRd.AsText(b64);
   decoded := Base64ToBinSafe(TrimControlChars(b64));
   if decoded = '' then
-    exit; // maybe some pending command chars
+    exit; // maybe some pending command chars - retry later
   fRd.Reset;
   rtsp := fOwner.ConnectionFindAndLock(fRtspTag, cReadOnly);
   if rtsp <> nil then
@@ -219,7 +219,7 @@ destructor TRtspOverHttpServer.Destroy;
 var
   {%H-}log: ISynLog;
 begin
-  log := fLogClass.Enter(self, 'Destroy');
+  fLogClass.EnterLocal(log, self, 'Destroy');
   inherited Destroy;
   fPendingGet.Free;
 end;
@@ -227,7 +227,7 @@ end;
 type
   TProxySocket = class(THttpServerSocket)
   protected
-    fExpires: cardinal; // shr MilliSecsPerSecShl
+    fExpires: cardinal; // GetTickSec
   published
     property Method;
     property URL;
@@ -259,7 +259,7 @@ begin
   aConnection := nil;
   get := nil;
   result := false;
-  log := fLogClass.Enter('ConnectionCreate(%)', [pointer(aSocket)], self);
+  fLogClass.EnterLocal(log, 'ConnectionCreate(%)', [pointer(aSocket)], self);
   try
     res := aSocket.MakeBlocking; // otherwise sock.GetRequest() fails
     if (res <> nrOK) and
@@ -280,10 +280,10 @@ begin
         cookie := sock.HeaderGetValue('X-SESSIONCOOKIE');
         if cookie = '' then
           exit;
+        now := GetTickSec;
         fPendingGet.Safe.WriteLock;
         try
           found := -1;
-          now := GetTickCount64 shr MilliSecsPerSecShl;
           for i := fPendingGet.Count - 1 downto 0 do
           begin
             old := fPendingGet.ObjectPtr[i];

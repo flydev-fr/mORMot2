@@ -83,6 +83,8 @@ unit mormot.net.relay;
   down for whatever reason (e.g. network failure), both ends will be notified
   with no dandling sockets.
 
+  Warning: such relay is incompatible with rsoPerConnectionNonce server option.
+
   See Sample "WebSockets Relay" for a stand-alone Public Relay project,
   which could be reused as plain binary - no recompilation is needed.
 
@@ -228,7 +230,7 @@ type
 
 { ******************** Public and Private relay process }
 
-  TAbstractRelay = class(TSynLocked)
+  TAbstractRelay = class(TObjectOSLock)
   protected
     fLog: TSynLogClass;
     fStarted: RawUtf8;
@@ -267,6 +269,7 @@ type
   end;
 
   /// implements a Public Relay server, e.g. located on a small Linux/BSD box
+  // - warning: relay is incompatible with rsoPerConnectionNonce server option
   TPublicRelay = class(TAbstractRelay)
   protected
     fServerJwt: TJwtAbstract;
@@ -316,6 +319,7 @@ type
 
   /// implements a Private Relay client, located in a private network behind
   // a restricted firewall
+  // - warning: relay is incompatible with rsoPerConnectionNonce server option
   TPrivateRelay = class(TAbstractRelay)
   protected
     fRelayHost, fRelayPort, fRelayKey, fRelayCustomHeaders,
@@ -908,7 +912,7 @@ var
   log: ISynLog;
 begin
   inherited Create(aLog);
-  log := fLog.Enter('Create: bind clients on %, server on %, encrypted=% %',
+  fLog.EnterLocal(log, 'Create: bind clients on %, server on %, encrypted=% %',
     [aClientsPort, aServerPort, BOOL_STR[aServerKey <> ''], aServerJwt], self);
   fServerJwt := aServerJwt;
   fServer := TWebSocketServer.Create(aServerPort, nil, nil, 'relayserver',
@@ -932,9 +936,10 @@ destructor TPublicRelay.Destroy;
 var
   log: ISynLog;
 begin
-  log := fLog.Enter(self, 'Destroy');
+  fLog.EnterLocal(log, self, 'Destroy');
   fStatTix := 0; // force GetStats recomputation
-  log.Log(sllDebug, 'Destroying %', [self], self);
+  if Assigned(log) then
+    log.Log(sllDebug, 'Destroying %', [self], self);
   fClients.Free;
   fServerConnected := nil;
   fServer.Free;
@@ -963,7 +968,7 @@ begin
     if fServerConnected <> nil then
     begin
       fLog.Add.Log(sllWarning, 'OnBeforeBody % already connected to %',
-        [aRemoteIP, fServerConnected.RemoteIP], self);
+        [aRemoteIP, fServerConnected.Protocol.RemoteIP], self);
       result := HTTP_NOTACCEPTABLE;
     end
     else
@@ -998,11 +1003,11 @@ var
   start, diff: Int64;
   log: ISynLog;
 begin
-  result := 504; // HTTP_GATEWAYTIMEOUT
-  log := fLog.Enter('OnClientsRequest #% % % %',  [Ctxt.ConnectionID,
+  fLog.EnterLocal(log, 'OnClientsRequest #% % % %',  [Ctxt.ConnectionID,
     Ctxt.RemoteIP, Ctxt.Method, Ctxt.Url], self);
   if Ctxt.ConnectionID = 0 then
     ERelayProtocol.RaiseUtf8('%.OnClientsRequest: RequestID=0', [self]);
+  result := 504; // HTTP_GATEWAYTIMEOUT
   SetRestFrame(frame, 0,
     Ctxt.Url, Ctxt.Method, Ctxt.InHeaders, Ctxt.InContent, Ctxt.InContentType);
   Safe.Lock;
@@ -1171,7 +1176,7 @@ begin
   // caller made fSafe.Lock
   split(ipprotocoluri, #13, ip, protocol);
   split(protocol, #13, protocol, url);
-  log := fLog.Enter('NewServerClient(%:%) for #% %/% %',
+  fLog.EnterLocal(log, 'NewServerClient(%:%) for #% %/% %',
     [fServerHost, fServerPort, connection, ip, url, protocol], self);
   if fServerRemoteIPHeader <> '' then
     header := fServerRemoteIPHeader + ip;
@@ -1196,7 +1201,7 @@ var
 begin
   if not Connected then
     exit;
-  log := fLog.Enter('Disconnect %:% count=%',
+  fLog.EnterLocal(log, 'Disconnect %:% count=%',
     [fRelayHost, fRelayPort, fServersCount], self);
   fSafe.Lock; // avoid deadlock with focConnectionClose notification
   try
@@ -1231,7 +1236,7 @@ function TPrivateRelay.TryConnect: boolean;
 var
   log: ISynLog;
 begin
-  log := fLog.Enter('TryConnect %:%', [fRelayHost, fRelayPort], self);
+  fLog.EnterLocal(log, 'TryConnect %:%', [fRelayHost, fRelayPort], self);
   if Connected then
     Disconnect; // will do proper Safe.Lock/UnLock
   fSafe.Lock;
@@ -1251,7 +1256,7 @@ destructor TPrivateRelay.Destroy;
 var
   log: ISynLog;
 begin
-  log := fLog.Enter(self, 'Destroy');
+  fLog.EnterLocal(log, self, 'Destroy');
   try
     if log <> nil then
       log.Log(sllDebug, 'Destroying %', [self], self);

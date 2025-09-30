@@ -265,8 +265,8 @@ type
 
 type
   TODBCConnectionProperties = TSqlDBOdbcConnectionProperties;
-  TODBCConnection = TSqlDBOdbcConnection;
-  TODBCStatement = TSqlDBOdbcStatement;
+  TODBCConnection           = TSqlDBOdbcConnection;
+  TODBCStatement            = TSqlDBOdbcStatement;
 
 {$endif PUREMORMOT2}
 
@@ -367,7 +367,7 @@ var
   Log: ISynLog;
   Len: SqlSmallint;
 begin
-  Log := SynDBLog.Enter(self, 'Connect');
+  SynDBLog.EnterLocal(Log, self, 'Connect');
   Disconnect; // force fDbc=nil
   if fEnv = nil then
     if (ODBC = nil) or
@@ -389,7 +389,7 @@ begin
           pointer(fUserID), length(fUserID), pointer(fPassWord), length(fPassWord)),
         SQL_HANDLE_DBC, fDbc)
       else if fDatabaseName = '' then
-        raise EOdbcException.CreateU(
+        EOdbcException.RaiseU(
           'Missing ServerName=DataSourceName or DataBaseName=FullConnectString')
       else
       begin
@@ -438,7 +438,7 @@ constructor TSqlDBOdbcConnection.Create(aProperties: TSqlDBConnectionProperties)
 var
   {%H-}Log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self, 'Create');
+  SynDBLog.EnterLocal(Log, self, 'Create');
   if not aProperties.InheritsFrom(TSqlDBOdbcConnectionProperties) then
     EOdbcException.RaiseUtf8('Invalid %.Create(%)', [self, aProperties]);
   fOdbcProperties := TSqlDBOdbcConnectionProperties(aProperties);
@@ -464,7 +464,7 @@ begin
        (fDbc <> nil) then
       with ODBC do
       begin
-        log := SynDBLog.Enter(self, 'Disconnect');
+        SynDBLog.EnterLocal(log, self, 'Disconnect');
         Disconnect(fDbc);
         FreeHandle(SQL_HANDLE_DBC, fDbc);
         fDbc := nil;
@@ -517,7 +517,7 @@ procedure TSqlDBOdbcConnection.StartTransaction;
 var
   {%H-}log: ISynLog;
 begin
-  log := SynDBLog.Enter(self, 'StartTransaction');
+  SynDBLog.EnterLocal(log, self, 'StartTransaction');
   if TransactionCount > 0 then
     EOdbcException.RaiseUtf8('% do not support nested transactions', [self]);
   inherited StartTransaction;
@@ -892,10 +892,10 @@ begin
     else
       case ColumnType of
         ftInt64:
-          W.AddNoJsonEscape(pointer(fColData[Col]));  // already as SQL_C_CHAR
+          W.AddString(fColData[Col]);  // already as SQL_C_CHAR
         ftDouble,
         ftCurrency:
-          W.AddFloatStr(pointer(fColData[Col]));      // already as SQL_C_CHAR
+          W.AddFloatStr(pointer(fColData[Col])); // already as SQL_C_CHAR
         ftDate:
           W.AddShort(@tmp, PSql_TIMESTAMP_STRUCT(pointer(fColData[Col]))^.
             ToIso8601(tmp{%H-}, ColumnValueDBType, fForceDateWithMS));

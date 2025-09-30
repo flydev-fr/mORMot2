@@ -88,7 +88,7 @@ type
     opcode: TWebSocketFrameOpCode;
     /// what is stored in the frame data, i.e. in payload field
     content: TWebSocketFramePayloads;
-    /// equals GetTickCount64 shr 10, as used for TWebSocketFrameList timeout
+    /// equals GetTickSec, as used for TWebSocketFrameList timeout
     tix: cardinal;
     /// the frame data itself
     // - is plain UTF-8 for focText kind of frame
@@ -176,7 +176,7 @@ type
     /// milliseconds delay between sending pending frames
     // - allow to gather output frames in ProcessLoopStepSend
     // - GetTickCount64 resolution is around 16ms on Windows and 4ms on Linux,
-    // so default 10 ms value seems fine for a cross-platform similar behavior
+    // so default 10 (ms) value seems fine for a cross-platform similar behavior
     // (resulting in a <16ms period on Windows, and <12ms period on Linux)
     SendDelay: cardinal;
     /// will close the connection after a given number of invalid Heartbeat sent
@@ -440,7 +440,7 @@ type
       var contentType, content: RawUtf8): boolean; virtual; abstract;
     /// convert the input information of REST request to a WebSocket frame
     procedure InputToFrame(Ctxt: THttpServerRequestAbstract; aNoAnswer: boolean;
-      out request: TWebSocketFrame; out head: RawUtf8); virtual;
+      var request: TWebSocketFrame; out head: RawUtf8); virtual;
     /// convert a WebSocket frame to the input information of a REST request
     function FrameToInput(var request: TWebSocketFrame; out aNoAnswer: boolean;
       Ctxt: THttpServerRequestAbstract): boolean; virtual;
@@ -449,7 +449,7 @@ type
       Ctxt: THttpServerRequestAbstract): cardinal; virtual;
     /// convert the output information of REST request to a WebSocket frame
     procedure OutputToFrame(Ctxt: THttpServerRequestAbstract; Status: cardinal;
-      var outhead: RawUtf8; out answer: TWebSocketFrame); virtual;
+      var outhead: RawUtf8; var answer: TWebSocketFrame); virtual;
   end;
 
   /// used to store the class of a TWebSocketProtocol type
@@ -639,7 +639,7 @@ type
 
   /// used to manage a thread-safe list of WebSockets frames
   // - TSynLocked because SendPendingOutgoingFrames() locks it and may take time
-  TWebSocketFrameList = class(TSynLocked)
+  TWebSocketFrameList = class(TObjectOSLock)
   protected
     fTimeoutSec: cardinal;
     fAnswerToIgnore: integer;
@@ -760,7 +760,7 @@ type
     fProcessCount: integer;
     fInvalidPingSendCount: cardinal;
     fSettings: PWebSocketProcessSettings;
-    fSafeIn, fSafeOut: TRTLCriticalSection;
+    fSafeIn, fSafeOut: TOSLock;
     fLastSocketTicks: Int64;
     fProcessName: RawUtf8;
     procedure MarkAsInvalid;
@@ -1108,13 +1108,15 @@ type
     /// retrieve the NameSpace value as a shortstring (used e.g. for RaiseESockIO)
     function NameSpaceShort: ShortString;
       {$ifdef HASINLINE} inline; {$endif}
-    /// quickly check if the Data content does match (mainly used for testing)
-    function DataIs(const Content: RawUtf8): boolean;
     /// decode the Data content JSON payload into a TDocVariant
     // - can optionally override the default JSON_SOCKETIO options
     // - warning: the Data/DataLen buffer will be decoded in-place, so modified
     function DataGet(out Dest: TDocVariantData;
-      Options: PDocVariantOptions = nil): boolean;
+      Options: PDocVariantOptions = nil): boolean; overload;
+    /// return the Data content payload raw buffer without any decoding
+    function DataGet(CodePage: cardinal = CP_UTF8): RawByteString; overload;
+    /// quickly check if the Data content does match (mainly used for testing)
+    function DataIs(const Content: RawUtf8): boolean;
     /// raise a ESockIO exception with the specified text context
     procedure RaiseESockIO(const ctx: RawUtf8);
     /// low-level kind of Socket.IO packet of this message
@@ -1480,7 +1482,7 @@ begin
   frame.opcode := opcode;
   if (ContentType <> '') and
      (Content <> '') and
-     not IdemPChar(pointer(ContentType), 'TEXT/') and
+     not IsContentTypeTextU(ContentType) and
      IsContentCompressed(pointer(Content), length(Content)) then
     frame.content := [fopAlreadyCompressed]
   else
@@ -1615,7 +1617,7 @@ procedure TWebSocketProtocol.SetEncryptKeyAes(aCipher: TAesAbstractClass;
 begin
   fEncryption := nil;
   fConnectionFlags := [hsrWebsockets];
-  if aKeySize < 128 then
+  if not ValidAesKeyBits(aKeySize) then
     exit;
   fEncryption := TProtocolAes.Create(aCipher, aKey, aKeySize);
   include(fConnectionFlags, hsrSecured)
@@ -1802,7 +1804,7 @@ begin
       if fTimeoutSec = 0 then
         continue;
       if currentSec = 0 then
-        currentSec := GetTickCount64 shr MilliSecsPerSecShl;
+        currentSec := GetTickSec;
       if currentSec > item^.tix then
         Delete(i);
     end;
@@ -1821,7 +1823,7 @@ begin
   if fTimeoutSec <= 0 then
     currentSec := 0
   else if currentSec = 0 then
-    currentSec := GetTickCount64 shr MilliSecsPerSecShl;
+    currentSec := GetTickSec;
   Safe.Lock;
   try
     n := Count;
@@ -1919,33 +1921,35 @@ begin
 end;
 
 procedure TWebSocketProtocolRest.InputToFrame(Ctxt: THttpServerRequestAbstract;
-  aNoAnswer: boolean; out request: TWebSocketFrame; out head: RawUtf8);
+  aNoAnswer: boolean; var request: TWebSocketFrame; out head: RawUtf8);
 var
-  Method, InContentType: RawByteString;
+  Method, InContentType: pointer; // weak RawUtf8 reference
   seq: integer;
+  p: PAnsiChar;
 begin
   // by convention, defaults are POST and JSON, to reduce frame size for SOA
-  if not PropNameEquals(Ctxt.Method, 'POST') then
-    Method := Ctxt.Method;
+  Method := nil;
+  if not IsPost(Ctxt.Method) then
+    Method := pointer(Ctxt.Method);
+  InContentType := nil;
   if (Ctxt.InContent <> '') and
-     (Ctxt.InContentType <> '') and
-     not PropNameEquals(Ctxt.InContentType, JSON_CONTENT_TYPE) then
-    InContentType := Ctxt.InContentType;
+     not IsContentTypeJsonU(Ctxt.InContentType) then
+    InContentType := pointer(Ctxt.InContentType);
   // compute the WebSockets frame and corresponding response header
   if fSequencing then
-  begin
+  begin // head = rxxxxxx = safe overlap after 16,777,216 frames
     seq := InterlockedIncrement(fSequence);
-    SetLength(head, 7); // rxxxxxx = safe overlap after 16,777,216 frames
-    PAnsiChar(pointer(head))^ := 'r';
-    BinToHexDisplayLower(@seq, PAnsiChar(pointer(head)) + 1, 3);
+    p := FastSetString(head, 7);
+    p^ := 'r';
+    BinToHexDisplayLower(@seq, p + 1, 3);
   end
   else
     head := 'request';
-  FrameCompress(head, [{%H-}Method, Ctxt.Url, Ctxt.InHeaders, ord(aNoAnswer)],
-    Ctxt.InContent, InContentType{%H-}, request);
+  FrameCompress(head, [RawUtf8(Method), Ctxt.Url, Ctxt.InHeaders, ord(aNoAnswer)],
+    Ctxt.InContent, RawUtf8(InContentType), request);
   if fSequencing then
     // 'r000001' -> 'a000001'
-    head[1] := 'a'
+    PByte(head)^ := ord('a')
   else
     head := 'answer';
 end;
@@ -1973,21 +1977,22 @@ begin
 end;
 
 procedure TWebSocketProtocolRest.OutputToFrame(Ctxt: THttpServerRequestAbstract;
-  Status: cardinal; var outhead: RawUtf8; out answer: TWebSocketFrame);
+  Status: cardinal; var outhead: RawUtf8; var answer: TWebSocketFrame);
 var
-  OutContentType: RawByteString;
+  OutContentType: pointer; // weak RawUtf8
 begin
+  OutContentType := nil;
   if (Ctxt.OutContent <> '') and
-     not PropNameEquals(Ctxt.OutContentType, JSON_CONTENT_TYPE) then
-    OutContentType := Ctxt.OutContentType;
+     not IsContentTypeJsonU(Ctxt.OutContentType) then
+    OutContentType := pointer(Ctxt.OutContentType);
   if NormToUpperAnsi7[outhead[3]] = 'Q' then
-    // 'request' -> 'answer'
+    // 'reQuest' -> 'answer'
     outhead := 'answer'
   else
     // 'r000001' -> 'a000001'
-    outhead[1] := 'a';
+    PByte(outhead)^ := ord('a');
   FrameCompress(outhead, [Status, Ctxt.OutCustomHeaders], Ctxt.OutContent,
-    OutContentType{%H-}, answer);
+    RawUtf8(OutContentType), answer);
 end;
 
 function TWebSocketProtocolRest.FrameToOutput(var answer: TWebSocketFrame;
@@ -2001,11 +2006,10 @@ begin
     exit;
   result := GetInteger(pointer(status));
   Ctxt.OutCustomHeaders := outHeaders;
-  if (outContentType = '') and
-     (outContent <> '') then
-    Ctxt.OutContentType := JSON_CONTENT_TYPE_VAR
-  else
-    Ctxt.OutContentType := outContentType;
+  if outContentType <> '' then
+    Ctxt.OutContentType := outContentType
+  else if outContent <> '' then
+    Ctxt.OutContentType := JSON_CONTENT_TYPE_VAR;
   Ctxt.OutContent := outContent;
 end;
 
@@ -2028,8 +2032,8 @@ procedure TWebSocketProtocolJson.FrameCompress(const Head: RawUtf8;
   var frame: TWebSocketFrame);
 var
   WR: TJsonWriter;
-  tmp: TTextWriterStackBuffer;
-  i: PtrInt;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
+  v, ve: PVarRec;
 begin
   frame.opcode := focText;
   frame.content := [];
@@ -2039,10 +2043,13 @@ begin
     WR.AddDirect('{');
     WR.AddFieldName(Head);
     WR.AddDirect('[');
-    for i := 0 to High(Values) do
+    v := @Values[0];
+    ve := @Values[High(Values)];
+    while PtrUInt(v) <= PtrUInt(ve) do
     begin
-      WR.AddJsonEscapeVarRec(@Values[i]);
+      WR.AddJsonEscapeVarRec(v);
       WR.AddComma;
+      inc(v);
     end;
     WR.AddDirect('"');
     WR.AddString(ContentType);
@@ -2050,12 +2057,12 @@ begin
     if Content = '' then
       WR.AddDirect('"', '"')
     else if (ContentType = '') or
-            PropNameEquals(ContentType, JSON_CONTENT_TYPE) then
-      WR.AddNoJsonEscape(pointer(Content), length(Content))
-    else if IdemPChar(pointer(ContentType), 'TEXT/') then
+            IsContentTypeJsonU(ContentType) then
+      WR.AddString(Content)
+    else if IsValidUtf8NotVoid(Content) then
       WR.AddJsonString(Content)
     else
-      WR.WrBase64(pointer(Content), length(Content), true);
+      WR.WrBase64(pointer(Content), length(Content), {withMagic=}true);
     WR.AddDirect(']', '}');
     WR.SetText(RawUtf8(frame.payload));
   finally
@@ -2135,15 +2142,13 @@ begin
   if info.Json = nil then
     exit;
   if (contentType = '') or
-     PropNameEquals(contentType, JSON_CONTENT_TYPE) then
+     IsContentTypeJsonU(contentType) then
     GetJsonItemAsRawJson(info.Json, RawJson(content))
-  else if IdemPChar(pointer(contentType), 'TEXT/') then
-    info.GetJsonValue(content)
   else
   begin
     info.GetJsonField;
     if not Base64MagicCheckAndDecode(info.Value, info.ValueLen,
-        RawByteString(content)) then
+        RawByteString(content)) then // e.g. IsValidUtf8() in FrameCompress()
       FastSetString(content, info.Value, info.ValueLen);
   end;
   result := true;
@@ -2204,8 +2209,8 @@ begin
        (logTextFrameContent in Owner.Settings.LogDetails) then
       with WebSocketLog.Family do
         if sllTrace in Level then
-          Add.Log(sllTrace, 'SendFrames=% len=% %',
-            [FramesCount * ord(result), len, EscapeToShort(tmp.buf, len)], self);
+          Add.LogEscape(sllTrace, 'SendFrames=%',
+            [FramesCount * ord(result)], tmp.buf, len, self);
   except
     result := false;
   end;
@@ -2254,7 +2259,7 @@ procedure TWebSocketProtocolBinary.FrameCompress(const Head: RawUtf8;
   const Values: array of const; const Content, ContentType: RawByteString;
   var frame: TWebSocketFrame);
 var
-  item: array[0..5] of TTempUtf8; // no memory allocation
+  item: array[0..5] of TTempUtf8; // no TempRawUtf8 memory allocation
   it: PTempUtf8;
   len, i: PtrInt;
   P: PUtf8Char;
@@ -2289,24 +2294,23 @@ var
   len: PtrInt;
   P: PUtf8Char;
 begin
-  P := pointer(frame.payload);
+  result := nil;
+  if frame.opcode <> focBinary then
+    exit;
   len := length(Head);
-  if (frame.opcode = focBinary) and
-     (length(frame.payload) >= len + 6) and
-     CompareMemFast(pointer(Head), P, len) then
-  begin
-    result := PosChar(P + len, FRAME_HEAD_SEP);
-    if result <> nil then
-    begin
-      if PMax <> nil then
-        PMax^ := pointer(P + length(frame.payload));
-      if HeadFound <> nil then
-        FastSetString(HeadFound^, P, PAnsiChar(result) - P);
-      inc(PByte(result));
-    end;
-  end
-  else
-    result := nil;
+  if length(frame.payload) < len + 6 then
+    exit;
+  P := pointer(frame.payload);
+  if not CompareMemFast(pointer(Head), P, len) then
+    exit;
+  result := PosChar(P + len, FRAME_HEAD_SEP);
+  if result = nil then
+    exit;
+  if PMax <> nil then
+    PMax^ := pointer(P + PStrLen(P - _STRLEN)^);
+  if HeadFound <> nil then
+    FastSetString(HeadFound^, P, PAnsiChar(result) - P);
+  inc(PByte(result));
 end;
 
 function TWebSocketProtocolBinary.FrameType(const frame: TWebSocketFrame): TShort31;
@@ -2816,14 +2820,15 @@ begin
   Protocol.fConnectionOpaque := ConnectionOpaque;
   Protocol.fRemoteIP := Http.HeaderGetValue('SEC-WEBSOCKET-REMOTEIP');
   if Protocol.RemoteIP = '' then
-  begin
-    Protocol.RemoteIP := RemoteIP;
-    Protocol.RemoteLocalhost := (RemoteIP = '127.0.0.1') or
-                                 (RemoteIPLocalHostAsVoidInServers and
-                                  (RemoteIP = ''));
-  end
+    if RemoteIP = '' then
+      Protocol.RemoteLocalhost := RemoteIPLocalHostAsVoidInServers
+    else
+    begin
+      Protocol.RemoteIP := RemoteIP;
+      Protocol.RemoteLocalhost := PCardinal(RemoteIP)^ = HOST_127
+    end
   else
-    Protocol.RemoteLocalhost := Protocol.RemoteIP = '127.0.0.1';
+    Protocol.RemoteLocalhost := PCardinal(RemoteIP)^ = HOST_127;
   // call OnUpgraded callback for request custom validation (e.g. bearer)
   if Assigned(fOnUpgraded) then
   begin
@@ -2913,8 +2918,8 @@ begin
   fSettings := aSettings;
   fIncoming := TWebSocketFrameList.Create(30 * 60);
   fOutgoing := TWebSocketFrameList.Create(0);
-  InitializeCriticalSection(fSafeIn);
-  InitializeCriticalSection(fSafeOut);
+  fSafeIn.Init;
+  fSafeOut.Init;
   fProtocol.AfterUpgrade(self); // e.g. for TWebSocketSocketIOClientProtocol
 end;
 
@@ -2925,13 +2930,13 @@ var
 begin
   if self = nil then
     exit;
-  EnterCriticalSection(fSafeOut);
+  fSafeOut.Lock;
   try
     if fConnectionCloseWasSent then
       exit;
     fConnectionCloseWasSent := true;
   finally
-    LeaveCriticalSection(fSafeOut);
+    fSafeOut.UnLock;
   end;
   LockedInc32(@fProcessCount);
   try
@@ -2958,7 +2963,7 @@ end;
 
 destructor TWebSocketProcess.Destroy;
 var
-  timeout: Int64;
+  endtix: cardinal;
   log: ISynLog;
 begin
   if fState = wpsCreate then
@@ -2966,7 +2971,7 @@ begin
   else if not fConnectionCloseWasSent then
   begin
     if log = nil then
-      log := WebSocketLog.Enter('Destroy %', [ToText(fState)^], self);
+      WebSocketLog.EnterLocal(log, 'Destroy %', [ToText(fState)^], self);
     if log <> nil then
       log.Log(sllTrace, 'Destroy: send focConnectionClose', self);
     Shutdown({waitforpong=}true);
@@ -2976,24 +2981,24 @@ begin
      not fProcessEnded then
   begin
     if log = nil then
-      log := WebSocketLog.Enter('Destroy %', [ToText(fState)^], self);
+      WebSocketLog.EnterLocal(log, 'Destroy %', [ToText(fState)^], self);
     if log <> nil then
       log.Log(sllDebug, 'Destroy: wait for fProcessCount=% fProcessEnded=%',
         [fProcessCount, fProcessEnded], self);
-    timeout := GetTickCount64 + 5000;
+    endtix := GetTickSec + 5;
     repeat
       SleepHiRes(1);
     until ((fProcessCount = 0) and fProcessEnded) or
-          (GetTickCount64 > timeout);
+          (GetTickSec > endtix);
     if log <> nil then
       log.Log(sllDebug,
         'Destroy: waited fProcessCount=%', [fProcessCount], self);
   end;
-  fProtocol.Free;
+  FreeAndNil(fProtocol);
   fOutgoing.Free;
   fIncoming.Free;
-  DeleteCriticalSection(fSafeIn); // to be done lately to avoid GPF
-  DeleteCriticalSection(fSafeOut);
+  fSafeIn.Done; // to be done lately to avoid GPF
+  fSafeOut.Done;
   inherited Destroy;
 end;
 
@@ -3034,9 +3039,10 @@ begin
     frame.opcode := focConnectionClose;
     frame.content := [];
     frame.tix := 0;
-    if (not Assigned(fProtocol.fOnBeforeIncomingFrame)) or
-       (not fProtocol.fOnBeforeIncomingFrame(self, frame)) then
-      fProtocol.ProcessIncomingFrame(self, frame, '');
+    if Assigned(fProtocol) then
+      if (not Assigned(fProtocol.fOnBeforeIncomingFrame)) or
+         (not fProtocol.fOnBeforeIncomingFrame(self, frame)) then
+        fProtocol.ProcessIncomingFrame(self, frame, '');
     if Assigned(fSettings.OnClientDisconnected) then
     begin
       WebSocketLog.Add.Log(sllTrace, 'ProcessStop: OnClientDisconnected', self);
@@ -3051,9 +3057,9 @@ end;
 procedure TWebSocketProcess.MarkAsInvalid;
 begin
   inc(fInvalidPingSendCount);
-  EnterCriticalSection(fSafeOut);
+  fSafeOut.Lock;
   fConnectionCloseWasSent := true;
-  LeaveCriticalSection(fSafeOut);
+  fSafeOut.UnLock;
 end;
 
 procedure TWebSocketProcess.SetLastPingTicks;
@@ -3083,9 +3089,10 @@ begin
       ; // nothing to do
     focText,
     focBinary:
-      if (not Assigned(fProtocol.fOnBeforeIncomingFrame)) or
-         (not fProtocol.fOnBeforeIncomingFrame(self, request)) then
-        fProtocol.ProcessIncomingFrame(self, request, '');
+      if Assigned(fProtocol) then
+        if (not Assigned(fProtocol.fOnBeforeIncomingFrame)) or
+           (not fProtocol.fOnBeforeIncomingFrame(self, request)) then
+          fProtocol.ProcessIncomingFrame(self, request, '');
     focConnectionClose:
       begin
         if (fState = wpsRun) and
@@ -3191,6 +3198,7 @@ begin
       SetLastPingTicks;
       fState := wpsRun;
       while (fOwnerThread = nil) or
+            (fProtocol = nil) or
             not fOwnerThread.Terminated do
         if ProcessLoopStepReceive({nonblockingflag=}nil) and
            ProcessLoopStepSend then
@@ -3207,14 +3215,14 @@ end;
 
 procedure TWebSocketProcess.WaitThreadStarted;
 var
-  endtix: Int64;
+  endtix: cardinal;
 begin
-  endtix := GetTickCount64 + 5000;
+  endtix := GetTickSec + 5;
   repeat
     SleepHiRes(0);
   until fProcessEnded or
         (fState <> wpsCreate) or
-        (GetTickCount64 > endtix);
+        (GetTickSec > endtix);
 end;
 
 function TWebSocketProcess.HiResDelay(var start: Int64): Int64;
@@ -3279,7 +3287,7 @@ begin
         WebSocketLog.Add.Log(sllDebug,
           'NotifyCallback: Waiting for AnswerToIgnore=%',
           [fIncoming.AnswerToIgnore], self);
-        start := GetTickCount64;
+        start := GetTickCount64; // HiResDelay() requires ms resolution
         max := start + 30000; // never wait forever
         repeat
           tix := HiResDelay(start); // 0/1/5/50/120-250 ms steps
@@ -3324,7 +3332,7 @@ begin
       // 2 seconds minimal wait
       max := 2000;
     inc(max, start);
-    while not fIncoming.Pop(fProtocol, head, answer, tix shr MilliSecsPerSecShl) do
+    while not fIncoming.Pop(fProtocol, head, answer, tix div MilliSecsPerSec) do
       if fState in [wpsDestroy, wpsClose] then
       begin
         WebSocketLog.Add.Log(sllError,
@@ -3407,7 +3415,7 @@ var
   f: TWebProcessInFrame;
 begin
   f.Init(self, @Frame);
-  EnterCriticalSection(fSafeIn);
+  fSafeIn.Lock;
   try
     if Blocking then
       repeat
@@ -3418,7 +3426,7 @@ begin
       f.Step(ErrorWithoutException);
     result := f.state = pfsDone;
   finally
-    LeaveCriticalSection(fSafeIn);
+    fSafeIn.UnLock;
   end;
 end;
 
@@ -3426,7 +3434,7 @@ function TWebSocketProcess.SendFrame(var Frame: TWebSocketFrame): boolean;
 var
   tmp: TSynTempBuffer;
 begin
-  EnterCriticalSection(fSafeOut);
+  fSafeOut.Lock;
   try
     Log(Frame, 'SendFrame', sllTrace, true);
     try
@@ -3449,7 +3457,7 @@ begin
     else if not fNoLastSocketTicks then
       SetLastPingTicks;
   finally
-    LeaveCriticalSection(fSafeOut);
+    fSafeOut.UnLock;
   end;
 end;
 
@@ -3863,6 +3871,11 @@ begin
   result := Dest.InitJsonInPlace(fData, Options^) <> nil;
 end;
 
+function TSocketIOMessage.DataGet(CodePage: cardinal): RawByteString;
+begin
+  FastSetStringCP(result, fData, fDataLen, CodePage);
+end;
+
 procedure TSocketIOMessage.RaiseESockIO(const ctx: RawUtf8);
 begin
   ESocketIO.RaiseUtf8('% NameSpace=% Data=%', [ctx, NameSpaceShort, fData]);
@@ -3889,9 +3902,11 @@ end;
 
 function TSocketIOLocalNamespace.RegisterEvent(const aEventName: RawUtf8;
   const aCallback: TOnSocketIOEvent): TSocketIOLocalNamespace;
+var
+  h: PEventHandler;
 begin
-  PEventHandler(fHandlers.AddUniqueName(aEventName,
-     'Duplicated event name %', [aEventName]))^.OnEvent := aCallback;
+  h := fHandlers.AddUniqueName(aEventName, 'Duplicated h name %', [aEventName]);
+  h^.OnEvent := aCallback;
   result := self;
 end;
 
@@ -3899,24 +3914,28 @@ procedure TSocketIOLocalNamespace.RegisterPublishedMethods(aInstance: TObject);
 var
   met: TPublishedMethodInfoDynArray;
   m: PtrInt;
+  h: PEventHandler;
 begin
   for m := 0 to GetPublishedMethods(aInstance, met) - 1 do
-    PEventHandler(fHandlers.AddUniqueName(met[m].Name,
-       'Duplicated event name % on %', [met[m].Name, aInstance]))^.
-      OnMethod := TOnSocketIOMethod(met[m].Method);
+  begin
+    h := fHandlers.AddUniqueName(met[m].Name,
+       'Duplicated h name % on %', [met[m].Name, aInstance]);
+    h^.OnMethod := TOnSocketIOMethod(met[m].Method);
+  end;
 end;
 
 procedure TSocketIOLocalNamespace.RegisterFrom(aAnother: TSocketIOLocalNamespace);
 var
   i: integer;
-  s: PEventHandler;
+  s, d: PEventHandler;
 begin
   if aAnother = nil then
     exit;
   s := pointer(aAnother.fHandler);
   for i := 1 to length(aAnother.fHandler) do
   begin
-    PEventHandler(fHandlers.AddUniqueName(s^.Name))^ := s^;
+    d := fHandlers.AddUniqueName(s^.Name);
+    d^ := s^;
     inc(s);
   end;
 end;

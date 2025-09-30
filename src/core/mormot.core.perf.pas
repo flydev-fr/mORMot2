@@ -181,7 +181,7 @@ type
     // see e.g. TSynMonitor.FromExternalMicroSeconds implementation
     // - warning: Start, Stop, Pause and Resume methods are then disallowed
     procedure FromExternalMicroSeconds(const MicroSeconds: QWord);
-      {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
+      {$ifdef HASSAFEINLINE} inline; {$endif} // Delphi 2007 is buggy as hell
     /// low-level method to force values settings to allow thread safe timing
     // - by default, this timer is not thread safe: you can use this method to
     // set the timing values from manually computed performance counters
@@ -282,9 +282,12 @@ type
     fMicroSeconds: TSynMonitorTotalMicroSec;
     function GetAsText: TShort16;
   public
+    /// increase the internal time elapsed counter
+    procedure AddTime(MicroSeconds: TSynMonitorTotalMicroSec);
+      {$ifdef HASSAFEINLINE} inline; {$endif} // Delphi 2007 is buggy as hell
     /// compute a number per second, of the current value
     function PerSecond(const Count: QWord): QWord;
-      {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
+      {$ifdef HASSAFEINLINE} inline; {$endif} // Delphi 2007 is buggy as hell
   published
     /// micro seconds time elapsed, as raw number
     property MicroSec: TSynMonitorTotalMicroSec
@@ -303,7 +306,7 @@ type
   public
     /// compute a number per second, of the current value
     function PerSecond(const Count: QWord): QWord;
-      {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
+      {$ifdef HASSAFEINLINE}inline;{$endif} // Delphi 2007 is buggy as hell
   published
     /// micro seconds time elapsed, as raw number
     property MicroSec: TSynMonitorOneMicroSec
@@ -327,6 +330,10 @@ type
   protected
     fBytes: TSynMonitorTotalBytes;
     function GetAsText: TShort16;
+  public
+    /// increase the internal size counter
+    procedure AddSize(Size: TSynMonitorTotalBytes);
+      {$ifdef HASSAFEINLINE} inline; {$endif}
   published
     /// number of bytes, as raw number
     property Bytes: TSynMonitorTotalBytes
@@ -375,7 +382,7 @@ type
   // non-reentrant Lock/UnLock to access its individual properties
   TSynMonitor = class(TObjectWithRttiMethods)
   protected
-    fSafe: TOSLightLock;
+    fSafe: TLightLock; // our fast non-reentrant lock
     fName: RawUtf8;
     fTaskCount: TSynMonitorCount64;
     fTotalTime: TSynMonitorTime;
@@ -383,14 +390,14 @@ type
     fMinimalTime: TSynMonitorOneTime;
     fAverageTime: TSynMonitorOneTime;
     fMaximalTime: TSynMonitorOneTime;
-    fPerSec: QWord;
     fInternalErrors: TSynMonitorCount;
     fProcessing: boolean;
     fTaskStatus: (taskNotStarted,taskStarted);
     fLastInternalError: variant;
+    function GetPerSec: QWord;
+    function GetAverageTime: TSynMonitorOneTime;
     // warning: lock-free Locked* virtual methods because LightLock is not reentrant
     procedure LockedProcessDoTask; virtual;
-    procedure LockedPerSecProperties; virtual;
     procedure LockedFromProcessTimer; virtual;
     procedure LockedSum(another: TSynMonitor); virtual;
     procedure LockedFromExternalMicroSeconds(const MicroSecondsElapsed: QWord);
@@ -462,11 +469,11 @@ type
     // methods are disallowed, and the global fTimer won't be used any more
     // - this method is to be used with an external timer for thread-safety
     procedure FromExternalMicroSeconds(const MicroSecondsElapsed: QWord);
-    /// non-reentrant exclusive lock acquisition - wrap fSafe.Lock
+    /// non-reentrant exclusive lock acquisition - calls TLightLock.Lock
     // - warning: this non-reentrant method would deadlock if called twice
     procedure Lock;
       {$ifdef HASINLINE} inline; {$endif}
-    /// release the non-reentrant exclusive lock - wrap fSafe.UnLock
+    /// release the non-reentrant exclusive lock - calls TLightLock.UnLock
     procedure UnLock;
       {$ifdef HASINLINE} inline; {$endif}
     /// customize JSON Serialization to set woEnumSetsAsText for readibility
@@ -494,13 +501,13 @@ type
       read fMinimalTime;
     /// the time spent in average during any working process
     property AverageTime: TSynMonitorOneTime
-      read fAverageTime;
+      read GetAverageTime;
     /// the highest time spent during any working process
     property MaximalTime: TSynMonitorOneTime
       read fMaximalTime;
     /// average of how many tasks did occur per second
     property PerSec: QWord
-      read fPerSec;
+      read GetPerSec;
     /// how many errors did occur during the processing
     property Errors: TSynMonitorCount
       read fInternalErrors;
@@ -517,7 +524,7 @@ type
   protected
     fSize: TSynMonitorSize;
     fThroughput: TSynMonitorThroughput;
-    procedure LockedPerSecProperties; override;
+    function GetThroughput: TSynMonitorThroughput;
     procedure LockedSum(another: TSynMonitor); override;
   public
     /// initialize the instance nested class properties
@@ -536,7 +543,7 @@ type
       read fSize;
     /// data processing bandwidth, returned as B/KB/MB per second
     property Throughput: TSynMonitorThroughput
-      read fThroughput;
+      read GetThroughput;
   end;
 
 
@@ -548,7 +555,8 @@ type
     fOutput: TSynMonitorSize;
     fInputThroughput: TSynMonitorThroughput;
     fOutputThroughput: TSynMonitorThroughput;
-    procedure LockedPerSecProperties; override;
+    function GetInputThroughput: TSynMonitorThroughput;
+    function GetOutputThroughput: TSynMonitorThroughput;
     procedure LockedSum(another: TSynMonitor); override;
   public
     /// initialize the instance nested class properties
@@ -569,10 +577,10 @@ type
       read fOutput;
     /// incoming data processing bandwidth, returned as B/KB/MB per second
     property InputThroughput: TSynMonitorThroughput
-      read fInputThroughput;
+      read GetInputThroughput;
     /// outgoing data processing bandwidth, returned as B/KB/MB per second
     property OutputThroughput: TSynMonitorThroughput
-      read fOutputThroughput;
+      read GetOutputThroughput;
   end;
 
 
@@ -746,8 +754,8 @@ type
   /// abstract class to track, compute and store TSynMonitor detailed statistics
   // - you should inherit from this class to implement proper data persistence,
   // e.g. using TSynMonitorUsageRest for ORM-based storage
-  // - SaveDB may take some time, so a TSynLocker OS lock is used, not TRWLock
-  TSynMonitorUsage = class(TSynLocked)
+  // - SaveDB may take some time, so a regular TObjectOSLock is used, not TRWLock
+  TSynMonitorUsage = class(TObjectOSLock)
   protected
     fLog: TSynLogFamily;
     fTracked: array of TSynMonitorUsageTrack;
@@ -2288,6 +2296,10 @@ var
   /// global variable filled by GetSmbiosInfo from SMBIOS binary information
   Smbios: TSmbiosInfo;
 
+/// register our custom JSON serialization of TSmbiosInfo
+// - called e.g. by GetSmbiosInfo - do nothing if called more than once
+procedure RegisterSmbiosInfoJson;
+
 /// retrieve and decode DMI/SMBIOS data into high-level Smbios global variable
 // - on POSIX, requires at least once root to access SMBIOS raw memory
 // so may return false unless the information has been cached locally
@@ -2550,6 +2562,11 @@ begin
   MicroSecToString(fMicroSeconds, result);
 end;
 
+procedure TSynMonitorTime.AddTime(MicroSeconds: TSynMonitorTotalMicroSec);
+begin
+  inc(fMicroSeconds, MicroSeconds);
+end;
+
 function TSynMonitorTime.PerSecond(const Count: QWord): QWord;
 begin
   {$ifdef FPC}
@@ -2595,13 +2612,20 @@ end;
 
 function TSynMonitorSize.GetAsText: TShort16;
 begin
+  result[0] := #0;
   AppendKB(fBytes, result, not fTextNoSpace);
+end;
+
+procedure TSynMonitorSize.AddSize(Size: TSynMonitorTotalBytes);
+begin
+  inc(fBytes, Size);
 end;
 
 { TSynMonitorOneSize }
 
 function TSynMonitorOneSize.GetAsText: TShort16;
 begin
+  result[0] := #0;
   AppendKB(fBytes, result, not fTextNoSpace);
 end;
 
@@ -2609,6 +2633,7 @@ end;
 
 function TSynMonitorThroughput.GetAsText: TShort16;
 begin
+  result[0] := #0;
   AppendKB(fBytesPerSec, result, not fTextNoSpace);
   AppendShortTwoChars(ord('/') + ord('s') shl 8, @result);
 end;
@@ -2630,7 +2655,6 @@ constructor TSynMonitor.Create(const aName: RawUtf8);
 begin
   Create;
   fName := aName;
-  fSafe.Init; // mandatory for TOSLightLock
 end;
 
 destructor TSynMonitor.Destroy;
@@ -2641,7 +2665,6 @@ begin
   fLastTime.Free;
   fTotalTime.Free;
   inherited Destroy;
-  fSafe.Done; // mandatory for TOSLightLock
 end;
 
 function TSynMonitor.RttiBeforeWriteObject(W: TTextWriter;
@@ -2705,7 +2728,6 @@ begin
       fMaximalTime.MicroSec := InternalTimer.LastTimeInMicroSec;
     fTaskStatus := taskNotStarted;
   end;
-  LockedPerSecProperties;
   fProcessing := false;
 end;
 
@@ -2761,11 +2783,12 @@ begin
 end;
 
 procedure TSynMonitor.LockedProcessErrorInteger(info: integer);
+var
+  v: TSynVarData; // no need of a true variant with implicit try..finally
 begin
-  try
-    LockedProcessError(info);
-  except
-  end;
+  v.VType := varInteger;
+  v.VInteger := info;
+  LockedProcessError(variant(v));
 end;
 
 procedure TSynMonitor.ProcessError(const info: variant);
@@ -2793,12 +2816,16 @@ begin
   ProcessError(info);
 end;
 
-procedure TSynMonitor.LockedPerSecProperties;
-begin
-  if fTaskCount = 0 then
-    exit; // avoid division per zero
-  fPerSec := fTotalTime.PerSecond(fTaskCount);
-  fAverageTime.MicroSec := fTotalTime.MicroSec div fTaskCount;
+function TSynMonitor.GetPerSec: QWord;
+begin // caller made fSafe.Lock before accessing/serializing the properties
+  result := fTotalTime.PerSecond(fTaskCount); // delayed computation
+end;
+
+function TSynMonitor.GetAverageTime: TSynMonitorOneTime;
+begin // caller made fSafe.Lock before accessing/serializing the properties
+  if fTaskCount <> 0 then // avoid division per zero
+    fAverageTime.MicroSec := fTotalTime.MicroSec div fTaskCount;
+  result := fAverageTime;
 end;
 
 procedure TSynMonitor.Sum(another: TSynMonitor);
@@ -2824,7 +2851,7 @@ end;
 
 procedure TSynMonitor.LockedSum(another: TSynMonitor);
 begin
-  fTotalTime.MicroSec := fTotalTime.MicroSec + another.fTotalTime.MicroSec;
+  fTotalTime.AddTime(another.fTotalTime.MicroSec);
   if (fMinimalTime.MicroSec = 0) or
      (another.fMinimalTime.MicroSec < fMinimalTime.MicroSec) then
     fMinimalTime.MicroSec := another.fMinimalTime.MicroSec;
@@ -2834,6 +2861,7 @@ begin
   if another.Processing then
     fProcessing := true; // if any thread is active, whole daemon is active
   inc(fInternalErrors, another.Errors);
+  // PerSec and AverageTime are lazily computed on request to avoid div ops
 end;
 
 procedure TSynMonitor.LockedWriteDetailsTo(W: TTextWriter);
@@ -2845,7 +2873,6 @@ procedure TSynMonitor.ComputeDetailsTo(W: TTextWriter);
 begin
   fSafe.Lock;
   try
-    LockedPerSecProperties; // may not have been calculated after Sum()
     LockedWriteDetailsTo(W);
   finally
     fSafe.UnLock;
@@ -2855,7 +2882,7 @@ end;
 function TSynMonitor.ComputeDetailsJson: RawUtf8;
 var
   W: TJsonWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -2888,23 +2915,23 @@ begin
   fSize.Free;
 end;
 
-procedure TSynMonitorWithSize.LockedPerSecProperties;
-begin
-  inherited LockedPerSecProperties;
+function TSynMonitorWithSize.GetThroughput: TSynMonitorThroughput;
+begin // caller made fSafe.Lock before accessing/serializing the properties
   fThroughput.BytesPerSec := fTotalTime.PerSecond(fSize.Bytes);
+  result := fThroughput;
 end;
 
 procedure TSynMonitorWithSize.AddSize(const Bytes: QWord);
 begin
   fSafe.Lock;
-  fSize.Bytes := fSize.Bytes + Bytes;
+  fSize.AddSize(Bytes);
   fSafe.UnLock;
 end;
 
 procedure TSynMonitorWithSize.AddSize(const Bytes, MicroSecs: QWord);
 begin
   fSafe.Lock;
-  fSize.Bytes := fSize.Bytes + Bytes;
+  fSize.AddSize(Bytes);
   LockedFromExternalMicroSeconds(MicroSecs);
   fSafe.UnLock;
 end;
@@ -2913,7 +2940,7 @@ procedure TSynMonitorWithSize.LockedSum(another: TSynMonitor);
 begin
   inherited LockedSum(another);
   if another.InheritsFrom(TSynMonitorWithSize) then
-    AddSize(TSynMonitorWithSize(another).Size.Bytes);
+    fSize.AddSize(TSynMonitorWithSize(another).Size.Bytes);
 end;
 
 
@@ -2937,35 +2964,44 @@ begin
   inherited Destroy;
 end;
 
-procedure TSynMonitorInputOutput.LockedPerSecProperties;
-begin
-  inherited LockedPerSecProperties;
+function TSynMonitorInputOutput.GetInputThroughput: TSynMonitorThroughput;
+begin // caller made fSafe.Lock before accessing/serializing the properties
   fInputThroughput.BytesPerSec  := fTotalTime.PerSecond(fInput.Bytes);
-  fOutputThroughput.BytesPerSec := fTotalTime.PerSecond(fOutput.Bytes);
+  result := fInputThroughput;
+end;
+
+function TSynMonitorInputOutput.GetOutputThroughput: TSynMonitorThroughput;
+begin // caller made fSafe.Lock before accessing/serializing the properties
+  fOutputThroughput.BytesPerSec  := fTotalTime.PerSecond(fOutput.Bytes);
+  result := fOutputThroughput;
 end;
 
 procedure TSynMonitorInputOutput.AddSize(const Incoming, Outgoing: QWord);
 begin
   fSafe.Lock;
-  fInput.Bytes  := fInput.Bytes + Incoming;
-  fOutput.Bytes := fOutput.Bytes + Outgoing;
+  fInput.AddSize(Incoming);
+  fOutput.AddSize(Outgoing);
   fSafe.UnLock;
 end;
 
 procedure TSynMonitorInputOutput.Notify(
   const Incoming, Outgoing, MicroSec: QWord; Status: integer);
-var
-  error: boolean;
 begin
-  error := not StatusCodeIsSuccess(Status);
   fSafe.Lock;
   // inlined AddSize
-  fInput.Bytes  := fInput.Bytes + Incoming;
-  fOutput.Bytes := fOutput.Bytes + Outgoing;
-  // inlined FromExternalMicroSeconds
-  LockedFromExternalMicroSeconds(MicroSec);
+  fInput.AddSize(Incoming);
+  fOutput.AddSize(Outgoing);
+  // inlined LockedFromExternalMicroSeconds
+  inc(fTaskCount); // = LockedProcessDoTask
+  fTotalTime.AddTime(MicroSec);
+  fLastTime.MicroSec := MicroSec;
+  if (fMinimalTime.MicroSec = 0) or
+     (MicroSec < fMinimalTime.MicroSec) then
+    fMinimalTime.MicroSec := MicroSec;
+  if MicroSec > fMaximalTime.MicroSec then
+    fMaximalTime.MicroSec := MicroSec;
   // inlined ProcessErrorNumber(Status)
-  if error then
+  if not StatusCodeIsSuccess(Status) then
     LockedProcessErrorInteger(Status);
   fSafe.UnLock;
 end;
@@ -2973,11 +3009,10 @@ end;
 procedure TSynMonitorInputOutput.LockedSum(another: TSynMonitor);
 begin
   inherited LockedSum(another);
-  if another.InheritsFrom(TSynMonitorInputOutput) then
-  begin
-    fInput.Bytes  := fInput.Bytes  + TSynMonitorInputOutput(another).Input.Bytes;
-    fOutput.Bytes := fOutput.Bytes + TSynMonitorInputOutput(another).Output.Bytes;
-  end;
+  if not another.InheritsFrom(TSynMonitorInputOutput) then
+    exit;
+  fInput.AddSize(TSynMonitorInputOutput(another).Input.Bytes);
+  fOutput.AddSize(TSynMonitorInputOutput(another).Output.Bytes);
 end;
 
 
@@ -3129,7 +3164,7 @@ begin
   else
     instanceName := Name;
   if instanceName = '' then
-    ClassToText(Instance.ClassType, instanceName);
+    ClassToText(PClass(Instance)^, instanceName);
   fSafe.Lock;
   try
     n := length(fTracked);
@@ -3833,7 +3868,8 @@ end;
 
 function TSystemUse.HistoryData(aProcessID, aDepth: integer): TSystemUseDataDynArray;
 var
-  i, n, last: PtrInt;
+  i, j, n, last: PtrInt;
+  res: ^TSystemUseData;
 begin
   result := nil;
   if self = nil then
@@ -3850,20 +3886,23 @@ begin
            (n > aDepth) then
           n := aDepth;
         SetLength(result, n); // make ordered copy
+        res := pointer(result);
         for i := 0 to n - 1 do
         begin
-          if i <= fDataIndex then
-            result[i] := Data[fDataIndex - i]
+          j := fDataIndex - i;
+          if j >= 0 then
+            res^ := Data[j]
           else
           begin
-            result[i] := Data[last];
+            res^ := Data[last];
             dec(last);
           end;
-          if PInt64(@result[i].Timestamp)^ = 0 then
-          begin
-            SetLength(result, i); // truncate to latest available sample
+          if PInt64(@res^.Timestamp)^ = 0 then
+          begin // truncate to latest available sample
+            SetLength(result, i); // keep result[0]..result[i-1]
             break;
           end;
+          inc(res);
         end;
       end;
   finally
@@ -4288,7 +4327,91 @@ end;
 { ************ DMI/SMBIOS Binary Decoder }
 
 var
-  GetSmbiosInfoChecked: boolean;
+  GetSmbiosInfoChecked, RegisteredSmbiosInfoJson: boolean;
+
+const
+  _TSmbiosBios = 'n,v,b,s,r,f:RawUtf8 c:TSmbiosBiosFlags';
+  _TSmbiosSystem = 'm,p,v,s,u,k,f:RawUtf8 w:TSmbiosSystemWakeup';
+  _TSmbiosBoard = 'm,p,v,s,a,l:RawUtf8 f:TSmbiosBoardFeatures t:TSmbiosBoardType';
+  _TSmbiosChassis = 'l:boolean t:TSmbiosChassisType m,v,s,a:RawUtf8 ' +
+    'b,w,h:TSmbiosChassisState p:TSmbiosChassisSecurityState o:cardinal u,c:byte';
+  _TSmbiosCache = 'd:RawUtf8 v:byte b,k:boolean l:TSmbiosCacheLocation ' +
+    'o:TSmbiosCacheMode s,m:RawUtf8 c,r:TSmbiosCacheSramType n:byte ' +
+    'e:TSmbiosCacheEcc t:TSmbiosCacheType a:TSmbiosCacheAssociativity';
+  _TSmbiosProcessor = 'd:RawUtf8 t:TSmbiosProcessorType f:word i,m,v,g:RawUtf8 ' +
+    'u:TSmbiosProcessorStatus l:boolean p:TSmbiosProcessorUpgrade ' +
+    'x,z,k:word 1,2,3:TSmbiosCache s,a,n:RawUtf8 c,e,r,b:word ' +
+    'h:TSmbiosProcessorFlags';
+  _TSmbiosConnector = 'i:RawUtf8 j:TSmbiosConnectorType e:RawUtf8 ' +
+    'f:TSmbiosConnectorType p:TSmbiosConnectorPort';
+  _TSmbiosSlot = 'd:RawUtf8 t:TSmbiosSlotType w:TSmbiosSlotWidth';
+  _TSmbiosMemory = 'w,d:word s:RawUtf8 f:TSmbiosMemoryFormFactor r:byte ' +
+    't:TSmbiosMemoryType e:TSmbiosMemoryDetails l,b,m,n,a,p:RawUtf8 c:word';
+  _TSmbiosMemoryArray = 'l:TSmbiosMemoryArrayLocation u:TSmbiosMemoryArrayUse ' +
+    'e:TSmbiosMemoryArrayEcc c:RawUtf8 n:word d:array of TSmbiosMemory';
+  _TSmbiosPointingDevice = // no RTTI -> embedded within _TSmbiosInfo
+    't:TSmbiosPointingType i:TSmbiosPointingInterface b:byte';
+  _TSmbiosBattery = 'l,m,s,n,v,c,g,h,d:RawUtf8';
+  _TSmbiosSecurity = 'f,a,k,p:TSmbiosSecurityStatus';
+  _TSmbiosInfo = 'b:TSmbiosBios s:TSmbiosSystem h:{' + _TSmbiosSecurity + '} ' +
+    'm:array of TSmbiosBoard e:array of TSmbiosChassis ' +
+    'p:array of TSmbiosProcessor r:array of TSmbiosMemoryArray ' +
+    'c:array of TSmbiosConnector t:array of TSmbiosSlot ' +
+    'd:[' + _TSmbiosPointingDevice + '] w:array of TSmbiosBattery ' +
+    'o:array of RawUtf8';
+
+procedure RegisterSmbiosInfoJson;
+begin
+  if RegisteredSmbiosInfoJson then
+    exit;
+  Rtti.RegisterTypes([
+    TypeInfo(TSmbiosBiosFlags),
+    TypeInfo(TSmbiosSystemWakeup),
+    TypeInfo(TSmbiosBoardFeatures),
+    TypeInfo(TSmbiosBoardType),
+    TypeInfo(TSmbiosChassisType),
+    TypeInfo(TSmbiosChassisState),
+    TypeInfo(TSmbiosChassisSecurityState),
+    TypeInfo(TSmbiosCacheLocation),
+    TypeInfo(TSmbiosCacheMode),
+    TypeInfo(TSmbiosCacheSramType),
+    TypeInfo(TSmbiosCacheEcc),
+    TypeInfo(TSmbiosCacheType),
+    TypeInfo(TSmbiosCacheAssociativity),
+    TypeInfo(TSmbiosProcessorType),
+    TypeInfo(TSmbiosProcessorStatus),
+    TypeInfo(TSmbiosProcessorUpgrade),
+    TypeInfo(TSmbiosProcessorFlags),
+    TypeInfo(TSmbiosConnectorType),
+    TypeInfo(TSmbiosConnectorPort),
+    TypeInfo(TSmbiosSlotType),
+    TypeInfo(TSmbiosSlotWidth),
+    TypeInfo(TSmbiosMemoryFormFactor),
+    TypeInfo(TSmbiosMemoryType),
+    TypeInfo(TSmbiosMemoryDetails),
+    TypeInfo(TSmbiosMemoryArrayLocation),
+    TypeInfo(TSmbiosMemoryArrayUse),
+    TypeInfo(TSmbiosMemoryArrayEcc),
+    TypeInfo(TSmbiosSecurityStatus),
+    TypeInfo(TSmbiosPointingType),
+    TypeInfo(TSmbiosPointingInterface)
+  ]);
+  Rtti.RegisterFromText([
+    TypeInfo(TSmbiosBios),        _TSmbiosBios,
+    TypeInfo(TSmbiosSystem),      _TSmbiosSystem,
+    TypeInfo(TSmbiosBoard),       _TSmbiosBoard,
+    TypeInfo(TSmbiosChassis),     _TSmbiosChassis,
+    TypeInfo(TSmbiosCache),       _TSmbiosCache,
+    TypeInfo(TSmbiosProcessor),   _TSmbiosProcessor,
+    TypeInfo(TSmbiosConnector),   _TSmbiosConnector,
+    TypeInfo(TSmbiosSlot),        _TSmbiosSlot,
+    TypeInfo(TSmbiosMemory),      _TSmbiosMemory,
+    TypeInfo(TSmbiosMemoryArray), _TSmbiosMemoryArray,
+    TypeInfo(TSmbiosBattery),     _TSmbiosBattery,
+    TypeInfo(TSmbiosInfo),        _TSmbiosInfo
+  ]);
+  RegisteredSmbiosInfoJson := true;
+end;
 
 function GetSmbiosInfo: boolean;
 begin
@@ -4296,6 +4419,7 @@ begin
   begin
     GlobalLock;
     try
+      RegisterSmbiosInfoJson; // may be needed to work with TSmbiosInfo
       if not GetSmbiosInfoChecked then
       begin
         if GetRawSmbios then // fill both RawSmbios and _Smbios[]
@@ -4378,8 +4502,8 @@ begin
 end;
 
 const
-  _ROMSIZ: array[0..3] of string[2] = ('MB', 'GB', '??', '??');
-  _VOLT:   array[0..3] of string[3] = ('5', '3.3', '2.9', '?');
+  _ROMSIZ: array[0..3] of TShort3 = ('MB', 'GB', '??', '??');
+  _VOLT:   array[0..3] of TShort3 = ('5', '3.3', '2.9', '?');
 
 procedure CacheSize8(b: PtrUInt; var res: RawUtf8);
 var
@@ -4428,6 +4552,8 @@ var
   cacheh, memh, arrh: TWordDynArray;
   proc: array of record l1, l2, l3: integer; end;
 begin
+  if not RegisteredSmbiosInfoJson then
+    RegisterSmbiosInfoJson;
   Finalize(info);
   FillCharFast(info, SizeOf(info), 0);
   result := false;
@@ -4907,37 +5033,6 @@ begin
 end;
 
 
-const
-  _TSmbiosBios = 'n,v,b,s,r,f:RawUtf8 c:TSmbiosBiosFlags';
-  _TSmbiosSystem = 'm,p,v,s,u,k,f:RawUtf8 w:TSmbiosSystemWakeup';
-  _TSmbiosBoard = 'm,p,v,s,a,l:RawUtf8 f:TSmbiosBoardFeatures t:TSmbiosBoardType';
-  _TSmbiosChassis = 'l:boolean t:TSmbiosChassisType m,v,s,a:RawUtf8 ' +
-    'b,w,h:TSmbiosChassisState p:TSmbiosChassisSecurityState o:cardinal u,c:byte';
-  _TSmbiosCache = 'd:RawUtf8 v:byte b,k:boolean l:TSmbiosCacheLocation ' +
-    'o:TSmbiosCacheMode s,m:RawUtf8 c,r:TSmbiosCacheSramType n:byte ' +
-    'e:TSmbiosCacheEcc t:TSmbiosCacheType a:TSmbiosCacheAssociativity';
-  _TSmbiosProcessor = 'd:RawUtf8 t:TSmbiosProcessorType f:word i,m,v,g:RawUtf8 ' +
-    'u:TSmbiosProcessorStatus l:boolean p:TSmbiosProcessorUpgrade ' +
-    'x,z,k:word 1,2,3:TSmbiosCache s,a,n:RawUtf8 c,e,r,b:word ' +
-    'h:TSmbiosProcessorFlags';
-  _TSmbiosConnector = 'i:RawUtf8 j:TSmbiosConnectorType e:RawUtf8 ' +
-    'f:TSmbiosConnectorType p:TSmbiosConnectorPort';
-  _TSmbiosSlot = 'd:RawUtf8 t:TSmbiosSlotType w:TSmbiosSlotWidth';
-  _TSmbiosMemory = 'w,d:word s:RawUtf8 f:TSmbiosMemoryFormFactor r:byte ' +
-    't:TSmbiosMemoryType e:TSmbiosMemoryDetails l,b,m,n,a,p:RawUtf8 c:word';
-  _TSmbiosMemoryArray = 'l:TSmbiosMemoryArrayLocation u:TSmbiosMemoryArrayUse ' +
-    'e:TSmbiosMemoryArrayEcc c:RawUtf8 n:word d:array of TSmbiosMemory';
-  _TSmbiosPointingDevice = // no RTTI -> embedded within _TSmbiosInfo
-    't:TSmbiosPointingType i:TSmbiosPointingInterface b:byte';
-  _TSmbiosBattery = 'l,m,s,n,v,c,g,h,d:RawUtf8';
-  _TSmbiosSecurity = 'f,a,k,p:TSmbiosSecurityStatus';
-  _TSmbiosInfo = 'b:TSmbiosBios s:TSmbiosSystem h:{' + _TSmbiosSecurity + '} ' +
-    'm:array of TSmbiosBoard e:array of TSmbiosChassis ' +
-    'p:array of TSmbiosProcessor r:array of TSmbiosMemoryArray ' +
-    'c:array of TSmbiosConnector t:array of TSmbiosSlot ' +
-    'd:[' + _TSmbiosPointingDevice + '] w:array of TSmbiosBattery ' +
-    'o:array of RawUtf8';
-
 procedure InitializeUnit;
 begin
   {$ifdef CPUINTELARM}
@@ -4950,52 +5045,6 @@ begin
     CpuFeaturesText := LowerCase(CpuInfoFeatures); // fallback to /proc/cpuinfo
     {$endif OSLINUXANDROID}
   end;
-  Rtti.RegisterTypes([
-    TypeInfo(TSmbiosBiosFlags),
-    TypeInfo(TSmbiosSystemWakeup),
-    TypeInfo(TSmbiosBoardFeatures),
-    TypeInfo(TSmbiosBoardType),
-    TypeInfo(TSmbiosChassisType),
-    TypeInfo(TSmbiosChassisState),
-    TypeInfo(TSmbiosChassisSecurityState),
-    TypeInfo(TSmbiosCacheLocation),
-    TypeInfo(TSmbiosCacheMode),
-    TypeInfo(TSmbiosCacheSramType),
-    TypeInfo(TSmbiosCacheEcc),
-    TypeInfo(TSmbiosCacheType),
-    TypeInfo(TSmbiosCacheAssociativity),
-    TypeInfo(TSmbiosProcessorType),
-    TypeInfo(TSmbiosProcessorStatus),
-    TypeInfo(TSmbiosProcessorUpgrade),
-    TypeInfo(TSmbiosProcessorFlags),
-    TypeInfo(TSmbiosConnectorType),
-    TypeInfo(TSmbiosConnectorPort),
-    TypeInfo(TSmbiosSlotType),
-    TypeInfo(TSmbiosSlotWidth),
-    TypeInfo(TSmbiosMemoryFormFactor),
-    TypeInfo(TSmbiosMemoryType),
-    TypeInfo(TSmbiosMemoryDetails),
-    TypeInfo(TSmbiosMemoryArrayLocation),
-    TypeInfo(TSmbiosMemoryArrayUse),
-    TypeInfo(TSmbiosMemoryArrayEcc),
-    TypeInfo(TSmbiosSecurityStatus),
-    TypeInfo(TSmbiosPointingType),
-    TypeInfo(TSmbiosPointingInterface)
-  ]);
-  Rtti.RegisterFromText([
-    TypeInfo(TSmbiosBios),        _TSmbiosBios,
-    TypeInfo(TSmbiosSystem),      _TSmbiosSystem,
-    TypeInfo(TSmbiosBoard),       _TSmbiosBoard,
-    TypeInfo(TSmbiosChassis),     _TSmbiosChassis,
-    TypeInfo(TSmbiosCache),       _TSmbiosCache,
-    TypeInfo(TSmbiosProcessor),   _TSmbiosProcessor,
-    TypeInfo(TSmbiosConnector),   _TSmbiosConnector,
-    TypeInfo(TSmbiosSlot),        _TSmbiosSlot,
-    TypeInfo(TSmbiosMemory),      _TSmbiosMemory,
-    TypeInfo(TSmbiosMemoryArray), _TSmbiosMemoryArray,
-    TypeInfo(TSmbiosBattery),     _TSmbiosBattery,
-    TypeInfo(TSmbiosInfo),        _TSmbiosInfo
-  ]);
 end;
 
 initialization

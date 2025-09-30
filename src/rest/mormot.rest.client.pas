@@ -78,10 +78,12 @@ type
   // - passHashed means that the passwod is already hashed as in
   // TAuthUser.PasswordHashHexa i.e. Sha256('salt'+Value)
   // - passKerberosSpn indicates that the password is the Kerberos SPN domain
+  // - passModularCrypt is used internally together with TModularCryptFormat
   TRestClientSetUserPassword = (
     passClear,
     passHashed,
-    passKerberosSpn);
+    passKerberosSpn,
+    passModularCrypt);
 
   /// algorithms known by TRestClientAuthenticationSignedUri and
   // TRestServerAuthenticationSignedUri to digitaly compute the
@@ -135,18 +137,19 @@ type
   public
     /// class method to be used on client side to create a remote session
     // - call this method instead of TRestClientUri.SetUser() if you need
-    // a custom authentication class
-    // - if saoUserByLogonOrID is defined in the server Options, aUserName may
-    // be a TAuthUser.ID and not a TAuthUser.LogonName
-    // - if passClear is used, you may specify aHashSalt and aHashRound,
-    // to enable Pbkdf2HmacSha256() use instead of plain Sha256(), or set
-    // aDigestAlgo to use the DIGEST-HA0 algorithm
+    // a custom authentication class, or some additional parameters
+    // - if saoUserByLogonOrID is defined in the server Options, aUserName would
+    // be accepted either as TAuthUser.LogonName or ToUtf8(TAuthUser.ID)
+    // - default aPasswordKind=passModularCrypt will ask the server for the
+    // "Modular Crypt" algorithm and parameters to use for client-side hashing
+    // - for aPasswordKind=passClear, aHashRound will trigger mORMot 1 PBKDF2;
+    // use aHashRound=0 for plain Sha256(), or set aDigestAlgo for DIGEST-HA0
     // - will call the ModelRoot/Auth service, i.e. call TRestServer.Auth()
     // published method to create a session for this user
     // - returns true on success
     class function ClientSetUser(Sender: TRestClientUri;
       const aUserName, aPassword: RawUtf8;
-      aPasswordKind: TRestClientSetUserPassword = passClear;
+      aPasswordKind: TRestClientSetUserPassword = passModularCrypt;
       const aHashSalt: RawUtf8 = ''; aHashRound: integer = 20000;
       aDigestAlgo: TDigestAlgo = daUndefined): boolean; virtual;
     /// class method to be called on client side to sign an URI
@@ -300,18 +303,12 @@ type
   {$ifdef DOMAINRESTAUTH}
   { will use mormot.lib.sspi/gssapi units depending on the OS }
 
-  /// authentication of the current logged user using Kerberos or NTLM
+  /// safe authentication of the current logged user using Kerberos
   // - calling the Security Support Provider Interface (SSPI) API on Windows,
   // or GSSAPI on Linux
-  // - is able to authenticate the currently logged user on the client side,
-  // using either NTLM (Windows only) or Kerberos - it will allow to safely
-  // authenticate on a mORMot server without prompting the user to enter its
-  // password
   // - match TRestServerAuthenticationSspi class on server side
-  // - if ClientSetUser() receives aUserName as '', aPassword should be either
-  // '' if you expect NTLM authentication to take place, or contain the SPN
-  // registration (e.g. 'mymormotservice/myserver.mydomain.tld') for Kerberos
-  // authentication
+  // - if ClientSetUser() receives aUserName as '', aPassword should contain the
+  // Kerberos SPN e.g. 'mymormotservice/myserver.mydomain.tld'
   // - if ClientSetUser() receives aUserName as 'DomainName\UserName', then
   // authentication will take place on the specified domain, with aPassword
   // as plain password value
@@ -334,7 +331,7 @@ type
   {$endif HASINLINE}
     // for internal use
     Authentication: TRestClientAuthenticationClass;
-    IDHexa8: RawUtf8;
+    IDHexa8: RawUtf8; // fSession.ID in hexadecimal
     PrivateKey: cardinal;
     Data: RawByteString;
     LastTick64: Int64;
@@ -363,7 +360,7 @@ type
     Server: RawUtf8;
     /// the remote server version, as retrieved after a SetUser() success
     Version: RawUtf8;
-    /// the remote server session tiemout in minutes, as retrieved after
+    /// the remote server session timeout in minutes, as retrieved after
     // a SetUser() success
     // - will be used to set SessionHeartbeatSeconds default
     ServerTimeout: integer;
@@ -381,8 +378,10 @@ type
 // backward compatibility types redirections
 {$ifndef PUREMORMOT2}
 
-  TSqlRestServerAuthenticationClientSetUserPassword = TRestClientSetUserPassword;
-  TSqlRestServerAuthenticationSignedUriAlgo = TRestAuthenticationSignedUriAlgo;
+  TSqlRestServerAuthenticationClientSetUserPassword  =
+     TRestClientSetUserPassword;
+  TSqlRestServerAuthenticationSignedUriAlgo =
+     TRestAuthenticationSignedUriAlgo;
   TSqlRestServerAuthenticationSignedUriComputeSignature  =
     TOnRestAuthenticationSignedUriComputeSignature;
   // TRestServerAuthentication* classes have client-side only corresponding
@@ -894,12 +893,13 @@ type
     // - if aHashedPassword is TRUE, the aPassword parameter is expected to
     // contain the already-hashed value, just as stored in PasswordHashHexa
     // (i.e. Sha256('salt'+Value) as in TAuthUser.SetPasswordPlain method)
+    // - if aHashedPassword is FALSE, will recognize any "Modular Crypt" safe
+    // hash, or fallback to the regular/old Sha256('salt'+Value) hashing method
     // - if SSPIAUTH conditional is defined, and aUserName='', a Windows
     // authentication will be performed via TRestClientAuthenticationSspi -
     // in this case, aPassword will contain the SPN domain for Kerberos
-    // (otherwise NTLM will be used), and table TAuthUser shall contain
-    // an entry for the logged Windows user, with the LoginName in form
-    // 'DomainName\UserName'
+    // and table TAuthUser shall contain an entry for the logged Windows user,
+    // with the LoginName in form 'DomainName\UserName'
     // - you can directly create the class method ClientSetUser() of a given
     // TRestClientAuthentication inherited class, if neither
     // TRestClientAuthenticationDefault nor TRestClientAuthenticationSspi
@@ -1071,7 +1071,7 @@ type
     /// the remote server version, as retrieved after a SetUser() success
     property SessionVersion: RawUtf8
       read fSession.Version;
-    /// the remote server session tiemout in minutes, as retrieved after
+    /// the remote server session timeout in minutes, as retrieved after
     // a SetUser() success
     // - will be used to set SessionHeartbeatSeconds default
     property SessionServerTimeout: integer
@@ -1126,7 +1126,7 @@ type
 {$ifndef PUREMORMOT2}
 
 type
-  TSqlRestClientUri = TRestClientUri;
+  TSqlRestClientUri    = TRestClientUri;
   TSqlRestClientUriDll = TRestClientLibraryRequest;
 
 {$endif PUREMORMOT2}
@@ -1252,39 +1252,37 @@ begin
   begin
     Sender.fSession.Data := ''; // reset temporary 'data' field
     result := ''; // error
+    exit;
+  end;
+  result := values[0].ToUtf8; // not ToUtf8(result) to please Delphi 2007
+  Base64ToBin(PAnsiChar(values[1].Text), values[1].Len, Sender.fSession.Data);
+  values[2].ToUtf8(Sender.fSession.Server);
+  values[3].ToUtf8(Sender.fSession.Version);
+  User.IDValue     := values[4].ToInt64;
+  User.LogonName   := values[5].ToUtf8; // set/fix using values from server
+  User.DisplayName := values[6].ToUtf8;
+  User.GroupRights := pointer(values[7].ToInteger);
+  Sender.fSession.ServerTimeout := values[8].ToInteger;
+  if Sender.fSession.ServerTimeout <= 0 then
+    Sender.fSession.ServerTimeout := 60; // default 1 hour if not suppplied
+  Sender.fSession.IDHexa8 := '';
+  if values[9].Text <> nil then
+  begin
+    a := GetEnumNameValueTrimmed(TypeInfo(TRestAuthenticationSignedUriAlgo),
+      values[9].Text, values[9].Len);
+    if a >= 0 then
+      Sender.fComputeSignature := TRestClientAuthenticationSignedUri.
+        GetComputeSignature(TRestAuthenticationSignedUriAlgo(a))
   end
   else
   begin
-    result := values[0].ToUtf8; // not ToUtf8(result) to please Delphi 2007
-    Base64ToBin(PAnsiChar(values[1].Text), values[1].Len, Sender.fSession.Data);
-    values[2].ToUtf8(Sender.fSession.Server);
-    values[3].ToUtf8(Sender.fSession.Version);
-    User.IDValue := values[4].ToInt64;
-    User.LogonName := values[5].ToUtf8; // set/fix using values from server
-    User.DisplayName := values[6].ToUtf8;
-    User.GroupRights := pointer(values[7].ToInteger);
-    Sender.fSession.ServerTimeout := values[8].ToInteger;
-    if Sender.fSession.ServerTimeout <= 0 then
-      Sender.fSession.ServerTimeout := 60; // default 1 hour if not suppplied
-    Sender.fSession.IDHexa8 := '';
-    if values[9].Text <> nil then
-    begin
-      a := GetEnumNameValueTrimmed(TypeInfo(TRestAuthenticationSignedUriAlgo),
-        values[9].Text, values[9].Len);
-      if a >= 0 then
-        Sender.fComputeSignature := TRestClientAuthenticationSignedUri.
-          GetComputeSignature(TRestAuthenticationSignedUriAlgo(a))
-    end
-    else
-    begin
-      cookie := FindNameValue(pointer(hdr), 'SET-COOKIE: ');
-      if cookie = nil then
-        exit;
-      cookie := GotoNextNotSpace(cookie);
-      if IdemPChar(cookie, '__SECURE-') then
-        inc(cookie, 9); // e.g. if rsoCookieSecure is in Server.Options
-      GetNextItem(cookie, ';', Sender.fSession.IDHexa8); // use first cookie
-    end;
+    cookie := FindNameValue(pointer(hdr), 'SET-COOKIE: ');
+    if cookie = nil then
+      exit;
+    cookie := GotoNextNotSpace(cookie);
+    if IdemPChar(cookie, '__SECURE-') then
+      inc(cookie, 9); // e.g. if rsoCookieSecure is in Server.Options
+    GetNextItem(cookie, ';', Sender.fSession.IDHexa8); // use first cookie
   end;
 end;
 
@@ -1297,24 +1295,26 @@ var
   key: RawUtf8;
 begin
   result := false;
-  if Sender = nil then
-    exit;
+  if Sender <> nil then
   try
     Sender.SessionClose;  // ensure Sender.SessionUser=nil
     U := TAuthUser(Sender.fModel.GetTableInherited(TAuthUser).Create);
     try
       U.LogonName := TrimU(aUserName);
       U.DisplayName := U.LogonName;
-      if aPasswordKind <> passClear then
-        U.PasswordHashHexa := aPassword // stored directly as supplied
-      else
+      if aPasswordKind = passModularCrypt then
+        U.Data := 'mcf'; // notify ask for the server for the "mcf" format
+      if aPasswordKind = passClear then
       begin
         if aDigestAlgo <> daUndefined then
           aHashRound := -ord(aDigestalgo);
         // compute with SHA-256, Pbkdf2HmacSha256() or DIGEST-HA0 hash
         U.SetPassword(aPassword, aHashSalt, aHashRound);
-      end;
-      key := ClientComputeSessionKey(Sender, U);
+      end
+      else
+        // passHashed, passKerberosSpn, passModularCrypt: already prepared
+        U.PasswordHashHexa := aPassword;
+      key := ClientComputeSessionKey(Sender, U); // overriden with algo
       result := Sender.SessionCreate(self, U, key);
     finally
       U.Free;
@@ -1332,23 +1332,43 @@ end;
 class function TRestClientAuthenticationDefault.ClientComputeSessionKey(
   Sender: TRestClientUri; User: TAuthUser): RawUtf8;
 var
-  aServerNonce, aClientNonce: RawUtf8;
+  resp, mcfhash, servernonce, clientnonce: RawUtf8;
   rnd: THash128;
+  values: array[0..1] of TValuePUtf8Char;
 begin
   result := '';
   if User.LogonName = '' then
     exit;
-  aServerNonce := Sender.CallBackGetResult('auth', ['username', User.LogonName]);
-  if aServerNonce = '' then
+  // try "mcf" for servers with "Modular Crypt" support
+  if (User.PasswordHashHexa <> '') and
+     (User.Data = 'mcf') then // passModularCrypt flag with clear password
+  begin
+    User.Data := '';
+    Sender.CallBackGet('auth', ['username', User.LogonName, 'mcf', 1], resp);
+    JsonDecode(resp, ['result', 'mcf'], @values);
+    values[0].ToUtf8(servernonce);
+    if servernonce = '' then
+      exit;
+    if values[1].Text <> nil then // this user has a "Modular Crypt" hash
+      mcfhash := ModularCryptHash(values[1].ToUtf8, User.PasswordHashHexa);
+    if mcfhash <> '' then
+      User.PasswordHashHexa := mcfhash
+    else
+      User.SetPassword(User.PasswordHashHexa, ''); // fallback to old hash
+  end
+  else
+    // regular authentication
+    servernonce := Sender.CallBackGetResult('auth', ['username', User.LogonName]);
+  if servernonce = '' then
     exit;
-  SharedRandom.Fill(@rnd, SizeOf(rnd)); // Lecuyer is enough for public random
+  Random128(@rnd); // unpredictable
   Join([CardinalToHex(OSVersionInt32), '_', BinToHexLower(@rnd, SizeOf(rnd))],
-    aClientNonce); // 160-bit nonce
+    clientnonce); // 160-bit nonce
   result := ClientGetSessionKey(Sender, User, [
-    'username',   User.LogonName,
-    'password',   Sha256U([Sender.fModel.Root, aServerNonce, aClientNonce,
-                           User.LogonName, User.PasswordHashHexa]),
-    'clientnonce', aClientNonce]);
+    'username',    User.LogonName,
+    'password',    Sha256U([Sender.fModel.Root, servernonce, clientnonce,
+                            User.LogonName, User.PasswordHashHexa]),
+    'clientnonce', clientnonce]);
 end;
 
 
@@ -1564,8 +1584,8 @@ end;
 
 class function TRestClientAuthenticationHttpAbstract.ClientSetUser(
   Sender: TRestClientUri; const aUserName, aPassword: RawUtf8;
-  aPasswordKind: TRestClientSetUserPassword;
-  const aHashSalt: RawUtf8; aHashRound: integer; aDigestAlgo: TDigestAlgo): boolean;
+  aPasswordKind: TRestClientSetUserPassword; const aHashSalt: RawUtf8;
+  aHashRound: integer; aDigestAlgo: TDigestAlgo): boolean;
 var
   res: RawUtf8;
   U: TAuthUser;
@@ -1628,39 +1648,37 @@ end;
 class function TRestClientAuthenticationSspi.ClientComputeSessionKey(
   Sender: TRestClientUri; User: TAuthUser): RawUtf8;
 var
-  SecCtx: TSecContext;
-  OutData: RawByteString;
+  sec: TSecContext;
+  bin: RawByteString;
 begin
   result := '';
   if not InitializeDomainAuth then
     exit;
   Sender.fSession.Data := '';
-  InvalidateSecContext(SecCtx);
+  InvalidateSecContext(sec);
   try
     repeat
       if User.LogonName <> '' then // will use ClientForceSpn() value
-        ClientSspiAuthWithPassword(SecCtx, Sender.fSession.Data,
-          User.LogonName, User.PasswordHashHexa, {spn=}'', OutData)
+        ClientSspiAuthWithPassword(sec, Sender.fSession.Data,
+          User.LogonName, User.PasswordHashHexa, {spn=}'', bin)
       else
-        ClientSspiAuth(SecCtx, Sender.fSession.Data,
-          {passKerberosSpn=} User.PasswordHashHexa, OutData);
-      if OutData = '' then
+        ClientSspiAuth(sec, Sender.fSession.Data,
+          {passKerberosSpn=} User.PasswordHashHexa, bin);
+      if (bin = '') or
+         (result <> '') then
         break;
-      if result <> '' then
-        break; // 2nd pass
-      // 1st call will return data, 2nd call SessionKey
-      result := ClientGetSessionKey(Sender, User,
+      result := ClientGetSessionKey(Sender, User, // single call with Kerberos
         ['username', '',
-         'data', BinToBase64(OutData)]);
+         'data', BinToBase64(bin)]);
     until Sender.fSession.Data = '';
     if result <> '' then
     begin
       // TRestServerAuthenticationSspi.Auth encrypted session.fPrivateSalt
-      OutData := Base64ToBin(result); // need a local copy on Windows / SSPI
-      result := SecDecrypt(SecCtx, OutData);
+      bin := Base64ToBin(result); // need a local copy on Windows / SSPI
+      result := SecDecrypt(sec, bin); // SecEncrypt(PrivateSalt)
     end;
   finally
-    FreeSecContext(SecCtx);
+    FreeSecContext(sec);
   end;
   // authenticated by Windows on the server side: use the returned
   // SessionKey + PasswordHashHexa to sign the URI, as usual
@@ -2170,7 +2188,7 @@ end;
 
 function TRestClientUri.IsOpen: boolean;
 var
-  started, elapsed, max: Int64;
+  started, elapsed, max: Int64; // we need ms resolution below
   wait, retry: integer;
   exc: ExceptionClass;
 begin
@@ -2639,7 +2657,7 @@ function TRestClientUri.CallBackGet(const aMethodName: RawUtf8;
   aTable: TOrmClass; aID: TID; aResponseHead: PRawUtf8): integer;
 var
   url, header: RawUtf8;
-  log: ISynLog; // for Enter auto-leave to work with FPC / Delphi 10.4+
+  {%H-}log: ISynLog; // for Enter auto-leave to work with FPC / Delphi 10.4+
 begin
   if self = nil then
     result := HTTP_CLIENTERROR
@@ -2648,17 +2666,12 @@ begin
     url := fModel.GetUriCallBack(aMethodName, aTable, aID);
     if high(aNameValueParameters) > 0 then
       Append(url, UrlEncode(aNameValueParameters));
-    log := fLogClass.Enter('CallBackGet %', [url], self);
+    fLogClass.EnterLocal(log, 'CallBackGet %', [url], self);
     result := Uri(url, 'GET', @aResponse, @header);
     if aResponseHead <> nil then
       aResponseHead^ := header;
-    if (log <> nil) and
-       (aResponse <> '') and
-       (sllServiceReturn in fLogLevel) then
-      if IsHtmlContentTypeTextual(pointer(header)) then
-        log.Log(sllServiceReturn, aResponse, self, MAX_SIZE_RESPONSE_LOG)
-      else
-        log.Log(sllServiceReturn, '% bytes [%]', [length(aResponse), header], self);
+    if sllServiceReturn in fLogLevel then
+      InternalLogResponse(aResponse, 'CallBackGet');
   end;
 end;
 
@@ -2695,11 +2708,11 @@ begin
   else
   begin
     u := fModel.GetUriCallBack(aMethodName, aTable, aID);
-    log := fLogClass.Enter('Callback %', [u], self);
+    fLogClass.EnterLocal(log, 'Callback %', [u], self);
     m := RawUtf8(ToText(method));
     result := Uri(u, m, @aResponse, aResponseHead, @aSentData);
-    InternalLog('% result=% resplen=%',
-      [m, result, length(aResponse)], sllServiceReturn);
+    if sllServiceReturn in fLogLevel then
+      InternalLogResponse(aResponse, 'CallBack');
   end;
 end;
 
@@ -2910,15 +2923,12 @@ end;
 
 function TRestClientUri.SetUser(const aUserName, aPassword: RawUtf8;
   aHashedPassword: boolean): boolean;
-const
-  HASH: array[boolean] of TRestClientSetUserPassword = (
-    passClear, passHashed);
+var
+  kind: TRestClientSetUserPassword;
 begin
+  result := false;
   if self = nil then
-  begin
-    result := false;
     exit;
-  end;
   {$ifdef DOMAINRESTAUTH}
   // try Windows/GSSAPI authentication with the current logged user
   result := true;
@@ -2928,8 +2938,11 @@ begin
        self, aUserName, aPassword, passKerberosSpn) then
     exit;
   {$endif DOMAINRESTAUTH}
+  kind := passModularCrypt; // will ask the serve, and also support passClear
+  if aHashedPassword then
+    kind := passHashed;
   result := TRestClientAuthenticationDefault.ClientSetUser(self, aUserName,
-    aPassword, HASH[aHashedPassword]);
+    aPassword, kind);
 end;
 
 {$ifndef PUREMORMOT2}
@@ -3124,7 +3137,7 @@ begin
     begin
       fRest.Services.CallBackUnRegister(IInvokable(obj));
       dec(fRefCount); // GetInterface() did increase the refcount
-      fRest := nil; // notify once
+      fRest := nil;   // notify once
     end;
 end;
 

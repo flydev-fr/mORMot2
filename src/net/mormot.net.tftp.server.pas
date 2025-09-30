@@ -84,7 +84,6 @@ type
     fLastSent: pointer;
     fLastSentLen: integer;
     procedure DoExecute; override;
-    procedure NotifyShutdown;
   public
     /// initialize this connection
     constructor Create(const Source: TTftpContext; Owner: TTftpServerThread); reintroduce;
@@ -217,10 +216,10 @@ destructor TTftpConnectionThread.Destroy;
 begin
   Terminate;
   fContext.Shutdown;
-  if fOwner <> nil then
-    fOwner.fConnection.Remove(self);
+  if Assigned(fOwner.fConnection) then // may be nil from fOwner.Destroy
+    fOwner.fConnection.Remove(self); // ownobject=false: just decrease Count
   inherited Destroy;
-  Freemem(fLastSent);
+  FreeMem(fLastSent);
   FreeMem(fContext.Frame);
 end;
 
@@ -315,15 +314,8 @@ begin
   // Destroy will call fContext.Shutdown and remove the connection
   tix := mormot.core.os.GetTickCount64 - tix;
   if tix <> 0 then
-    fLog.Log(sllDebug, 'DoExecute: % finished at %/s - connections=%/%',
-      [fContext.FileName, KB((fFileSize * 1000) div tix),
-       fOwner.ConnectionCount, fOwner.ConnectionTotal], self);
-end;
-
-procedure TTftpConnectionThread.NotifyShutdown;
-begin
-  fOwner := nil;
-  Terminate;
+    fLog.Log(sllDebug, 'DoExecute: % finished at %/s',
+      [fn, KB((fFileSize * 1000) div tix)], self);
 end;
 
 
@@ -344,7 +336,9 @@ begin
   fMaxConnections := 100; // = 100 threads, good enough for regular TFTP server
   fMaxRetry := 2;
   fOptions := Options;
-  inherited Create(LogClass, BindAddress, BindPort, ProcessName, 5000); // bind
+  // bind and launch the thread to start serving content
+  inherited Create(LogClass, BindAddress, BindPort, ProcessName, 5000);
+  // setup the execution parameters
   {$ifdef OSPOSIX}
   if ttoDropPriviledges in fOptions then
   begin
@@ -378,6 +372,10 @@ destructor TTftpServerThread.Destroy;
 begin
   inherited Destroy;
   fFileCache.Free;
+  FreeAndNil(fConnection); // paranoid (usually done in OnShutdown)
+  {$ifdef OSPOSIX}
+  FreeAndNil(fPosixFileNames);
+  {$endif OSPOSIX}
 end;
 
 procedure TTftpServerThread.OnShutdown;
@@ -386,10 +384,7 @@ begin
   if fConnection = nil then
     exit;
   NotifyShutdown;
-  FreeAndNil(fConnection);
-  {$ifdef OSPOSIX}
-  FreeAndNil(fPosixFileNames);
-  {$endif OSPOSIX}
+  FreeAndNil(fConnection); // nil for TTftpConnectionThread.Destroy
 end;
 
 procedure TTftpServerThread.NotifyShutdown;
@@ -400,19 +395,24 @@ begin
   if (self = nil) or
      (fConnection = nil) then
     exit;
-  t := pointer(fConnection.List);
-  for i := 1 to fConnection.Count do
-  begin
-    t^.NotifyShutdown; // also set fOwner=nil to avoid fConnection.Delete()
-    inc(t);
+  fConnection.Safe.WriteLock;
+  try
+    t := pointer(fConnection.List);
+    for i := 1 to fConnection.Count do
+    try
+      t^.Terminate;
+      inc(t);
+    except
+      // ignore any exception here
+    end;
+  finally
+    fConnection.Safe.WriteUnLock;
   end;
 end;
 
 procedure TTftpServerThread.TerminateAndWaitFinished(TimeOutMs: integer);
 var
-  i: integer;
   endtix: Int64;
-  t: ^TTftpConnectionThread;
 begin
   endtix := mormot.core.os.GetTickCount64 + TimeOutMs;
   // first notify all sub threads to terminate
@@ -420,14 +420,11 @@ begin
   // shutdown and wait for main accept() thread
   inherited TerminateAndWaitFinished(TimeOutMs);
   // wait for sub threads finalization
-  if fConnection = nil then
-    exit;
-  t := pointer(fConnection.List);
-  for i := 1 to fConnection.Count do
-  begin
-    t^.TerminateAndWaitFinished(endtix - mormot.core.os.GetTickCount64);
-    inc(t);
-  end;
+  if ConnectionCount <> 0 then
+    repeat
+      SleepHiRes(10);
+    until (ConnectionCount = 0) or
+          (mormot.core.os.GetTickCount64 > endtix);
 end;
 
 function TTftpServerThread.GetConnectionCount: integer;

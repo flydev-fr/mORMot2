@@ -520,6 +520,9 @@ type
     procedure RecordVersionFieldHandle(Occasion: TOrmOccasion;
       var Decoder: TJsonObjectDecoder);
     function GetStoredClassName: RawUtf8;
+    /// may be used as a slightly faster alternative to TOrmClass.Create
+    function NewOrmInstance: pointer;
+      {$ifdef HASINLINE}inline;{$endif}
   public
     /// initialize the abstract storage data
     constructor Create(aClass: TOrmClass; aServer: TRestOrmServer); reintroduce; virtual;
@@ -719,7 +722,7 @@ type
   // statement, with = < <= <> != >= > operators, and IS / IS NULL / ID IN (...)
   // - if used within a TOrmVirtualTableJson, you'll be able to handle any kind of
   // SQL statement (even joined SELECT or such) with this memory-stored database
-  // via the SQlite3 virtual tables engine
+  // via the SQLite3 virtual tables engine
   // - data can be stored and retrieved from a file (JSON format is used by
   // default, if BinaryFile parameter is left to false; a proprietary compressed
   // binary format can be used instead) if a file name is supplied at creating
@@ -1455,7 +1458,7 @@ type
   /// abstract REST storage with several database instances
   // - e.g. to maintain a per-User or per-Group (company) storage
   // - inherited class should override the NewStore virtual method, e.g.
-  // TRestStorageMultiDB as defined in mormot.orm.sqlite3.pas for SQlite3 storage
+  // TRestStorageMultiDB as defined in mormot.orm.sqlite3.pas for SQLite3 storage
   // - your custom class should override NewModel to provide the proper data model
   TRestStorageMulti = class(TObjectRWLightLock)
   protected
@@ -1712,14 +1715,6 @@ end;
 
 class function TOrmVirtualTable.ModuleName: RawUtf8;
 const
-  NAM: array[0..6] of PUtf8Char = (
-    'TSQLVIRTUALTABLE',
-    'TSQLVIRTUAL',
-    'TSQL',
-    'TORMVIRTUALTABLE',
-    'TORMVIRTUAL',
-    'TORM',
-    nil);
   LEN: array[-1..5] of byte = (
     1,  // 'T'
     16, // 'TSQLVIRTUALTABLE'
@@ -1734,7 +1729,8 @@ begin
   else
   begin
     ClassToText(self, result);
-    system.delete(result, 1, LEN[IdemPPChar(pointer(result), @NAM)]);
+    system.delete(result, 1, LEN[IdemPCharSep(pointer(result),
+      'TSQLVIRTUALTABLE|TSQLVIRTUAL|TSQL|TORMVIRTUALTABLE|TORMVIRTUAL|TORM|')]);
   end;
 end;
 
@@ -2050,6 +2046,14 @@ begin
     ClassToText(fStoredClass, result);
 end;
 
+function TRestStorage.NewOrmInstance: pointer;
+var
+  rtti: TRttiCustom;
+begin // inlined TRttiCustom.ClassNewInstance
+  rtti := fStoredClassRecordProps.TableRtti;
+  result := TRttiCustomNewInstance(rtti.Cache.NewInstance)(rtti);
+end;
+
 
 
 { ************ TRestStorageInMemory as Stand-Alone JSON/Binary Storage }
@@ -2065,9 +2069,9 @@ begin
   result := 0; // mark error
   if TableModelIndex <> fStoredClassProps.TableIndex then
     exit;
-  rec := fStoredClass.Create;
+  rec := NewOrmInstance; // faster fStoredClass.Create
   try
-    rec.FillFrom(SentData);
+    rec.FillFrom(SentData); // make an internal copy of SentData
     StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'EngineAdd'{$endif});
     try
       result := AddOne(rec, rec.IDValue > 0, SentData);
@@ -2121,7 +2125,7 @@ begin
       exit; // invalid input
   end;
   // same logic than EngineAdd/EngineUpdate but with no memory alloc
-  rec := fStoredClass.Create;
+  rec := NewOrmInstance; // faster fStoredClass.Create
   try
     if rec.FillFromArray(Fields, Sent) then
     begin
@@ -2161,7 +2165,7 @@ begin
     result := false; // mark error
     exit;
   end;
-  rec := fStoredClass.Create;
+  rec := NewOrmInstance; // faster fStoredClass.Create
   try
     rec.FillFrom(SentData, @fields);
     rec.IDValue := ID;
@@ -2182,7 +2186,7 @@ begin
     result := false; // mark error
     exit;
   end;
-  rec := fStoredClass.Create;
+  rec := NewOrmInstance; // faster fStoredClass.Create
   try
     rec.SetFieldSqlVars(Values);
     rec.IDValue := ID;
@@ -2251,7 +2255,7 @@ begin
       [self, aClass]);
   fFileName := aFileName;
   fBinaryFile := aBinaryFile;
-  fSearchRec := fStoredClass.Create; // used to searched values
+  fSearchRec := NewOrmInstance; // used to searched values
   // hashed and compared by ID, with proper T*ObjArray (fake) RTTI information
   fValues.InitRtti(fStoredClassRecordProps.TableObjArrayRtti, fValue,
     TObjectWithIDDynArrayHashOne, TObjectWithIDDynArrayCompare, nil, @fCount);
@@ -3076,7 +3080,7 @@ begin
         if IsAllFields(b^) then
         begin
           if log = nil then // only start logging if something is to be written
-            log := logclass.Enter(self, 'TrackChangesAndFlush Add');
+            logclass.EnterLocal(log, self, 'TrackChangesAndFlush Add');
           batch.Add(p^, {senddata=}true, {forceid=}true, ALL_FIELDS, true);
           FillZero(b^); // flush
         end;
@@ -3090,7 +3094,7 @@ begin
         if not IsZero(b^) then
         begin
           if log = nil then
-            log := logclass.Enter(self, 'TrackChangesAndFlush Update');
+            logclass.EnterLocal(log, self, 'TrackChangesAndFlush Update');
           batch.Update(p^, b^, {DoNotAutoComputeFields=}true);
           FillZero(b^); // flush
         end;
@@ -3274,9 +3278,11 @@ begin
   result := '';
   ResCount := 0;
   if PropNameEquals(fBasicSqlCount, SQL) then
+    // SELECT COUNT(*) FROM tablename
     SetCount(TableRowCount(fStoredClass))
   else if PropNameEquals(fBasicSqlHasRows[false], SQL) or
           PropNameEquals(fBasicSqlHasRows[true], SQL) then
+    // SELECT ID FROM tablename LIMIT 1
     if TableHasRows(fStoredClass) then
     begin
       // return one expanded row with fake ID=1 - enough for the ORM usecase
@@ -3616,7 +3622,7 @@ begin
         id := 0;
         for i := 0 to n - 1 do
         begin
-          rec := fStoredClass.Create;
+          rec := NewOrmInstance; // faster Create
           inc(id, R.VarUInt64);
           rec.IDValue := id;
           fValue[i] := rec;
@@ -3626,7 +3632,7 @@ begin
         // ReadVarUInt32Array() decoded TID into ID32[]
         for i := 0 to n - 1 do
         begin
-          rec := fStoredClass.Create;
+          rec := NewOrmInstance; // faster Create
           rec.IDValue := ID32[i];
           fValue[i] := rec;
         end;
@@ -4079,8 +4085,8 @@ begin
       fOwner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
         ID, '', nil, fValue[i]);
     if fTrackChangesFieldBitsOffset <> 0 then
-      InternalTrackChangeUpdated(
-        fValue[i], fStoredClassRecordProps.CopiableFieldsBits);
+      InternalTrackChangeUpdated(fValue[i],
+                                 fStoredClassRecordProps.CopiableFieldsBits);
   finally
     StorageUnLock;
   end;

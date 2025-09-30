@@ -99,7 +99,7 @@ type
     fBatchValues: TRawUtf8DynArray;
     // some sub-functions used by Create() during DB initialization
     procedure InitializeExternalDB(const log: ISynLog);
-    procedure LogFields(const log: ISynLog);
+    procedure RetrieveFieldsExternal(const log: ISynLog);
     procedure FieldsInternalInit;
     function FieldsExternalIndexOf(
       const ColName: RawUtf8; CaseSensitive: boolean): PtrInt;
@@ -192,7 +192,7 @@ type
     // - you should not use this, but rather call OrmMapExternal()
     // - OrmProps.ExternalDatabase will map the associated TSqlDBConnectionProperties
     // - OrmProps.ExternalTableName will retrieve the real full table name,
-    // e.g. including any databas<e schema prefix
+    // e.g. including any database schema prefix
     constructor Create(aClass: TOrmClass; aServer: TRestOrmServer); override;
     /// delete a row, calling the external engine with SQL
     // - made public since a TRestStorage instance may be created
@@ -586,11 +586,12 @@ begin
   result := true;
 end;
 
-procedure TRestStorageExternal.LogFields(const log: ISynLog);
+procedure TRestStorageExternal.RetrieveFieldsExternal(const log: ISynLog);
 begin
   fProperties.GetFields(UnQuotedSQLSymbolName(fTableName), fFieldsExternal);
-  log.Log(sllDebug, 'GetFields', TypeInfo(TSqlDBColumnDefineDynArray),
-    fFieldsExternal, self);
+  if Assigned(log) then
+    log.Log(sllDebug, 'GetFields', TypeInfo(TSqlDBColumnDefineDynArray),
+      fFieldsExternal, self);
 end;
 
 function TRestStorageExternal.FieldsExternalIndexOf(
@@ -624,8 +625,9 @@ begin
   fTableName := fStoredClassMapping^.TableName;
   fProperties :=
     fStoredClassMapping^.ConnectionProperties as TSqlDBConnectionProperties;
-  log.Log(sllInfo, '% as % % Server=%',
-    [StoredClass, fTableName, fProperties, Owner], self);
+  if Assigned(log) then
+    log.Log(sllInfo, '% as % % Server=%',
+      [StoredClass, fTableName, fProperties, Owner], self);
   if fProperties = nil then
     ERestStorage.RaiseUtf8('%.Create: no external DB defined for %',
       [self, StoredClass]);
@@ -640,22 +642,24 @@ begin
         fStoredClassMapping^.MapField(nfo.Name, '"' + s + '"')
       else if fProperties.IsSqlKeyword(s) then
       begin
-        log.Log(sllWarning, '%.%: Field name % is not compatible with %',
-          [fStoredClass, nfo.Name, s, fProperties.DbmsEngineName], self);
+        if Assigned(log) then
+          log.Log(sllWarning, '%.%: Field name % is not compatible with %',
+            [fStoredClass, nfo.Name, s, fProperties.DbmsEngineName], self);
         if rpmAutoMapKeywordFields in options then
         begin
-          log.Log(sllWarning, '-> %.% mapped to %_',
-            [fStoredClass, nfo.Name, s], self);
+          if Assigned(log) then
+            log.Log(sllWarning, '-> %.% mapped to %_',
+              [fStoredClass, nfo.Name, s], self);
           fStoredClassMapping^.MapField(nfo.Name, s + '_');
         end
-        else
+        else if Assigned(log) then
           log.Log(sllWarning, '-> you should better use MapAutoKeywordFields', self);
       end;
     end;
   end;
   // create corresponding external table if necessary, and retrieve its fields info
   TableCreated := false;
-  LogFields(log);
+  RetrieveFieldsExternal(log);
   if not (rpmNoCreateMissingTable in options) then
     if fFieldsExternal = nil then
     begin
@@ -684,7 +688,7 @@ begin
         TableCreated := ExecuteDirect(s, [], [], false) <> nil;
       if TableCreated then
       begin
-        LogFields(log);
+        RetrieveFieldsExternal(log);
         if fFieldsExternal = nil then
           ERestStorage.RaiseUtf8(
             '%.Create: external table creation % failed: GetFields() ' +
@@ -729,7 +733,7 @@ begin
       if TableModified then
       begin
         // retrieve raw field information from DB after ALTER TABLE
-        LogFields(log);
+        RetrieveFieldsExternal(log);
         FieldsInternalInit;
       end;
     end;
@@ -759,7 +763,7 @@ var
 begin
   if aServer = nil then
     ERestStorage.RaiseUtf8('%.Create(%): aServer=%', [self, aClass, aServer]);
-  log := aServer.LogClass.Enter('Create %', [aClass], self);
+  aServer.LogClass.EnterLocal(log, 'Create %', [aClass], self);
   inherited Create(aClass, aServer);
   // initialize external DB process: setup ORM mapping, and create table/columns
   InitializeExternalDB(log);
@@ -856,7 +860,7 @@ begin
           end;
           if Alias <> '' then
           begin
-            W.AddShorter(' as ');
+            W.AddDirect(' ', 'a', 's', ' ');
             W.AddString(Alias);
           end
           else if not (Field in fStoredClassMapping^.FieldNamesMatchInternal) then
@@ -866,7 +870,7 @@ begin
             else
               // RowID may be reserved (e.g. for Oracle)
               name := fStoredClassRecordProps.Fields.List[Field - 1].name;
-            W.AddShorter(' as ');
+            W.AddDirect(' ', 'a', 's', ' ');
             if (FunctionName = '') or
                (FunctionKnown in [funcDistinct, funcMax]) then
               W.AddString(name)
@@ -915,11 +919,11 @@ begin
             end;
             if f > 0 then
               if JoinedOR then
-                W.AddShorter(' or ')
+                W.AddDirect(' ', 'o', 'r', ' ')
               else
                 W.AddShorter(' and ');
             if NotClause then
-              W.AddShorter('not ');
+              W.AddDirect('n', 'o', 't', ' ');
             if ParenthesisBefore <> '' then
               W.AddString(ParenthesisBefore);
             W.AddString(fStoredClassMapping^.FieldNameByIndex(Field - 1));
@@ -1416,7 +1420,7 @@ function TRestStorageExternal.EngineRetrieve(TableModelIndex: integer;
 var
   stmt: ISqlDBStatement;
   w: TJsonWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   // TableModelIndex is not useful here
   result := '';
@@ -2232,7 +2236,7 @@ begin
 end;
 
 const
-  SQL_OPER_WITH_PARAM: array[soEqualTo..soGreaterThanOrEqualTo] of string[3] = (
+  SQL_OPER_WITH_PARAM: array[soEqualTo..soGreaterThanOrEqualTo] of TShort3 = (
     '=?',      // soEqualTo
     '<>?',     // soNotEqualTo
     '<?',      // soLessThan

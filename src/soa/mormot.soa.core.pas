@@ -62,6 +62,8 @@ type
     /// overriden method creating an index on the Method/MicroSec columns
     class procedure InitializeTable(const Server: IRestOrmServer;
       const FieldName: RawUtf8; Options: TOrmInitializeTableOptions); override;
+    /// fill Input as TDocVariantData
+    procedure SetInput(Json: PUtf8Char; Capacity: PtrInt);
   published
     /// the 'interface.method' identifier of this call
     // - this column will be indexed, for fast SQL queries, with the MicroSec
@@ -72,14 +74,14 @@ type
     // - will be stored in JSON_FAST_EXTENDED format, i.e. with
     // shortened field names, for smaller TEXT storage
     // - content may be searched using JsonGet/JsonHas SQL functions on a
-    // SQlite3 storage, or with direct document query under MongoDB/PostgreSQL
+    // SQLite3 storage, or with direct document query under MongoDB/PostgreSQL
     property Input: variant
       read fInput write fInput;
     /// the output parameters, as a JSON document, including result: for a function
     // - will be stored in JSON_FAST_EXTENDED format, i.e. with
     // shortened field names, for smaller TEXT storage
     // - content may be searched using JsonGet/JsonHas SQL functions on a
-    // SQlite3 storage, or with direct document query under MongoDB/PostgreSQL
+    // SQLite3 storage, or with direct document query under MongoDB/PostgreSQL
     property Output: variant
       read fOutput write fOutput;
     /// the Session ID, if there is any
@@ -661,11 +663,10 @@ type
   TServiceContainer = class(TInterfaceResolverInjected)
   protected
     fOwner: TInterfaceResolver; // is a TRest instance
-    // list of services ['Calculator',...]
-    fInterface: TServiceContainerInterfaces;
+    fInterface: TServiceContainerInterfaces; // array of InterfaceName/Service
     fInterfaces: TDynArrayHashed;
     // list of service.method ['Calculator.Add','Calculator.Multiply',...]
-    fInterfaceMethod: TServiceContainerInterfaceMethods;
+    fInterfaceMethod: TServiceContainerInterfaceMethods; // dynamic array
     fInterfaceMethods: TDynArrayHashed;
     fExpectMangledUri: boolean;
     procedure SetExpectMangledUri(Mangled: boolean);
@@ -794,8 +795,8 @@ type
     ['{8D518FCB-62C3-42EB-9AE7-96ED322140F7}']
     /// will be called when a callback is released on the client side
     // - this method matches the TInterfaceFactory.MethodIndexCallbackReleased
-    // signature, so that it will be called with the interface instance by
-    // TServiceContainerServer.ReleaseFakeCallback
+    // signature, so that it will be called as POST root/cacheflush/_callback_
+    // to execute TServiceContainerServer.ClientFakeCallbackRelease()
     // - you may use it as such - see sample restws_chatserver.dpr:
     // ! procedure TChatService.CallbackReleased(const callback: IInvokable;
     // !   const interfaceName: RawUtf8);
@@ -960,7 +961,7 @@ type
     // a TServicesPublishedInterfaces JSON array, e.g.
     // $ [{"PublicUri":{"Address":"1.2.3.4","Port":"123","Root":"root"},"Names":['Calculator']},...]
     procedure FindServiceAll(const aServiceName: RawUtf8;
-      aWriter: TJsonWriter); overload;
+      aWriter: TJsonWriter; aTix64: Int64 = 0); overload;
     /// the number of milliseconds after which an entry expires
     // - is 0 by default, meaning no expiration
     // - you can set it to a value so that any service URI registered with
@@ -983,6 +984,11 @@ begin
   inherited;
   if FieldName = '' then
     Server.CreateSqlMultiIndex(self, ['Method', 'MicroSec'], false);
+end;
+
+procedure TOrmServiceLog.SetInput(Json: PUtf8Char; Capacity: PtrInt);
+begin
+  PDocVariantData(@fInput)^.InitJsonInPlace(Json, JSON_FAST_EXTENDED, nil, Capacity);
 end;
 
 
@@ -1506,6 +1512,7 @@ var
   ndx: integer;
   im: TServiceInternalMethod;
   m: PtrInt;
+  int: PServiceContainerInterface;
   uri: RawUtf8;
 begin
   if (self = nil) or
@@ -1516,10 +1523,10 @@ begin
     uri := aService.fInterfaceMangledUri
   else
     uri := aService.fInterfaceUri;
-  PServiceContainerInterface(fInterfaces.AddUniqueName(uri, @result))^.
-    Service := aService;
+  int := fInterfaces.AddUniqueName(uri, @result);
+  int^.Service := aService;
   // add associated methods - first SERVICE_PSEUDO_METHOD[], then from interface
-  uri := uri + '.';
+  Append(uri, '.');
   ndx := 0;
   for im := Low(im) to High(im) do
     AddServiceMethodInternal(uri + SERVICE_PSEUDO_METHOD[im], aService, ndx);
@@ -1704,7 +1711,7 @@ function TServiceContainer.AsJson: RawJson;
 var
   WR: TTextWriter;
   i: PtrInt;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   result := '';
   if (self = nil) or
@@ -1861,12 +1868,12 @@ begin
 end;
 
 procedure TServicesPublishedInterfacesList.FindServiceAll(
-  const aServiceName: RawUtf8; aWriter: TJsonWriter);
+  const aServiceName: RawUtf8; aWriter: TJsonWriter; aTix64: Int64);
 var
   i: PtrInt;
-  tix: Int64;
 begin
-  tix := GetTickCount64;
+  if aTix64 = 0 then
+    aTix64 := GetTickCount64;
   Safe.ReadLock;
   try
     aWriter.Add('[');
@@ -1875,7 +1882,7 @@ begin
       // for RegisterFromServer: return all TServicesPublishedInterfaces
       for i := 0 to Count - 1 do
         if (fTimeOut = 0) or
-           (fTimeoutTix[i] < tix) then
+           (fTimeoutTix[i] < aTix64) then
         begin
           aWriter.AddRecordJson(@List[i], TypeInfo(TServicesPublishedInterfaces));
           aWriter.AddComma;
@@ -1887,7 +1894,7 @@ begin
       for i := Count - 1 downto 0 do        // downwards to return the latest first
         if FindPropName(List[i].Names, aServiceName) >= 0 then
           if (fTimeOut = 0) or
-             (fTimeoutTix[i] < tix) then
+             (fTimeoutTix[i] < aTix64) then
           begin
             aWriter.AddRecordJson(@List[i].PublicUri, TypeInfo(TRestServerUri));
             aWriter.AddComma;

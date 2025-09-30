@@ -474,7 +474,7 @@ const
   type_Credential: array[boolean] of integer = (
     OCI_CRED_RDBMS, OCI_CRED_EXT);
 begin
-  log := SynDBLog.Enter(self, 'Connect');
+  SynDBLog.EnterLocal(log, self, 'Connect');
   Disconnect; // force fTrans=fError=fServer=fContext=nil
   Props := Properties as TSqlDBOracleConnectionProperties;
   with OCI do
@@ -592,7 +592,7 @@ constructor TSqlDBOracleConnection.Create(aProperties: TSqlDBConnectionPropertie
 var
   {%H-}log: ISynLog;
 begin
-  log := SynDBLog.Enter(self, 'Create');
+  SynDBLog.EnterLocal(log, self, 'Create');
   if not aProperties.InheritsFrom(TSqlDBOracleConnectionProperties) then
     ESqlDBOracle.RaiseUtf8('Invalid %.Create(%)', [self, aProperties]);
   inherited Create(aProperties);
@@ -688,7 +688,7 @@ procedure TSqlDBOracleConnection.StartTransaction;
 var
   log: ISynLog;
 begin
-  log := SynDBLog.Enter(self, 'StartTransaction');
+  SynDBLog.EnterLocal(log, self, 'StartTransaction');
   if TransactionCount > 0 then
     ESqlDBOracle.RaiseUtf8('Invalid %.StartTransaction: nested ' +
       'transactions are not supported by the Oracle driver', [self]);
@@ -1718,7 +1718,7 @@ txt:                    VDBType := SQLT_STR; // use STR external data type (SQLT
         // We move this after params binding to prevent "ORA-00932: inconsistent
         // datatypes" during call to StmtExecute with OCI_DESCRIBE_ONLY.
         // Because if called here sometimes it breaks the Oracle shared pool and
-        // only `ALTER system flush shared_pool` seems to fix the DB state
+        // only "ALTER system flush shared_pool" seems to fix the DB state
         SetColumnsForPreparedStatement;
       // 3. execute prepared statement and dispatch data in row buffers
       if (fColumnCount = 0) and
