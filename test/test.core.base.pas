@@ -233,6 +233,8 @@ type
     procedure _ParseCommandArgs;
     /// test RunRedirect() with stdin pipe
     procedure _RunRedirect;
+    /// test TExternalProcess interactive bidirectional pipes
+    procedure _ExternalProcess;
     /// test TExecutableCommandLine class
     procedure _TExecutableCommandLine;
     /// test IsMatch() function
@@ -11103,6 +11105,90 @@ begin
   Check(exitcode = 0, 'no stdin exitcode');
   Check(PosEx('no_stdin', output) > 0, 'no stdin output');
   {$endif OSPOSIX}
+end;
+
+procedure TTestCoreBase._ExternalProcess;
+var
+  proc: TExternalProcess;
+  output: RawByteString;
+  i: integer;
+begin
+  // Test 1: simple command with stdin -> stdout
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('findstr /r "."'), 'start findstr');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('cat'), 'start cat');
+    {$endif OSPOSIX}
+    Check(proc.Running, 'should be running');
+    Check(proc.Write('hello world' + #10), 'write');
+    proc.CloseStdin;
+    Check(proc.WaitFor(5000) >= 0, 'waitfor');
+    SleepHiRes(200); // let reader thread drain
+    output := proc.ReadAvailable;
+    Check(PosEx('hello world', output) > 0, 'output');
+    Check(not proc.Running, 'should not be running');
+  finally
+    proc.Free;
+  end;
+  // Test 2: multiple writes
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('findstr /r "."'), 'start findstr2');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('cat'), 'start cat2');
+    {$endif OSPOSIX}
+    for i := 1 to 5 do
+      Check(proc.Write(Int32ToUtf8(i) + #10), 'write line');
+    proc.CloseStdin;
+    Check(proc.WaitFor(5000) >= 0, 'waitfor2');
+    SleepHiRes(200);
+    output := proc.ReadAvailable;
+    for i := 1 to 5 do
+      Check(PosEx(Int32ToUtf8(i), output) > 0, 'multi output');
+  finally
+    proc.Free;
+  end;
+  // Test 3: WriteAndCloseStdin convenience
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('sort'), 'start sort');
+    Check(proc.WriteAndCloseStdin(
+      'banana' + #13#10 + 'apple' + #13#10 + 'cherry' + #13#10), 'writeclose');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('sort'), 'start sort');
+    Check(proc.WriteAndCloseStdin(
+      'banana' + #10 + 'apple' + #10 + 'cherry' + #10), 'writeclose');
+    {$endif OSPOSIX}
+    Check(proc.WaitFor(5000) >= 0, 'waitfor sort');
+    SleepHiRes(200);
+    output := proc.ReadAvailable;
+    Check(PosEx('apple', output) > 0, 'sorted output');
+  finally
+    proc.Free;
+  end;
+  // Test 4: Terminate a long-running process
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('ping -n 60 127.0.0.1'), 'start ping');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('sleep 60'), 'start sleep');
+    {$endif OSPOSIX}
+    Check(proc.Running, 'long running');
+    SleepHiRes(500);
+    Check(proc.Terminate(3000), 'terminate');
+    Check(not proc.Running, 'terminated');
+  finally
+    proc.Free;
+  end;
 end;
 
 initialization
