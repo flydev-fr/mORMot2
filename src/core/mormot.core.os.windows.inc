@@ -4684,6 +4684,8 @@ begin
     flags := (flags or CREATE_NEW_CONSOLE) and not DETACHED_PROCESS;
     exclude(ram, ramCtrlC); // not compatible with stand-alone console
   end;
+  if roWinNewProcessGroup in options then
+    flags := flags or CREATE_NEW_PROCESS_GROUP;
   if roWinJobCloseChildren in options then
     flags := flags or CREATE_BREAKAWAY_FROM_JOB; // child process in a new job
   // actually create the new process
@@ -4892,6 +4894,8 @@ begin
     flags := flags or (DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP);
   if roWinNewConsole in options then
     flags := (flags or CREATE_NEW_CONSOLE) and not DETACHED_PROCESS;
+  if roWinNewProcessGroup in options then
+    flags := flags or CREATE_NEW_PROCESS_GROUP;
   if roWinJobCloseChildren in options then
     flags := flags or CREATE_BREAKAWAY_FROM_JOB;
   // create the process

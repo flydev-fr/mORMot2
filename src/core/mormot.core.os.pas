@@ -5987,12 +5987,17 @@ type
   // roWinNoProcessDetach is defined - e.g. as RUN_CMD for RunCommand/RunRedirect
   // - roWinNewConsole won't inherit the parent console, but have its own console
   // - roWinKeepProcessOnTimeout won't make Ctrl+C / WM_QUIT or TerminateProcess
+  // - roWinNewProcessGroup creates the child in a new process group via
+  // CREATE_NEW_PROCESS_GROUP, allowing targeted GenerateConsoleCtrlEvent()
+  // to that specific process without affecting siblings - useful e.g. for
+  // graceful shutdown of multiple concurrent FFmpeg instances
   TRunOptions = set of (
     roEnvAddExisting,
     roWinJobCloseChildren,
     roWinNoProcessDetach,
     roWinNewConsole,
-    roWinKeepProcessOnTimeout);
+    roWinKeepProcessOnTimeout,
+    roWinNewProcessGroup);
 
 const
   /// the default options for RunCommand() and RunRedirect() transient execution
