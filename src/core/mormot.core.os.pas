@@ -6106,6 +6106,95 @@ var
   RunAbortMethods: TRunAbortMethods = RUNABORT_DEFAULT;
 
 
+{ ****************** TExternalProcess - Interactive Process with Bidirectional Pipes }
+
+type
+  /// interactive child process with bidirectional stdin/stdout pipes
+  // - unlike RunRedirect() which is a one-shot call, TExternalProcess allows
+  // ongoing communication with a long-lived process (REPL, FFmpeg, etc.)
+  // - a background reader thread continuously drains the child's stdout to
+  // prevent pipe-buffer deadlocks when both sides are writing
+  // - writing to stdin is done explicitly via Write() or WriteAndCloseStdin()
+  // - typical use: Start('node -i'), then Write('2+3\n'), ReadAvailable()
+  // - for FFmpeg graceful shutdown: Write('q'#10) then WaitFor()
+  TExternalProcess = class(TSynPersistent)
+  protected
+    fCommand: TRunArg;
+    fWorkDir: TFileName;
+    fOptions: TRunOptions;
+    fOnOutput: TOnRedirect;
+    {$ifdef OSWINDOWS}
+    fProcess: THandle;
+    fThread: THandle;
+    fJob: THandle;
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    fPid: cardinal;
+    {$endif OSPOSIX}
+    fStdinWrite: THandle;
+    fStdoutRead: THandle;
+    fReaderThreadID: TThreadID;
+    fReaderFinished: boolean;
+    fOutput: RawByteString;
+    fOutputSafe: TLightLock;
+    fExitCode: integer;
+    fStarted: boolean;
+    fTerminated: boolean;
+    function GetRunning: boolean;
+    function GetPid: cardinal;
+    function GetOutput: RawByteString;
+  public
+    /// release all handles and terminate the child process if still running
+    destructor Destroy; override;
+    /// start a new external process with bidirectional stdin/stdout pipes
+    // - returns true on success, false if the process could not be started
+    // - cmd is the full command line (executable + arguments)
+    // - options follows the same convention as RunRedirect()
+    function Start(const cmd: TRunArg; const env: TRunArg = '';
+      const wrkdir: TFileName = ''; options: TRunOptions = RUN_CMD): boolean;
+    /// write raw data to the process stdin pipe
+    // - returns true if all bytes were written, false on error (e.g. broken pipe)
+    function Write(const data: RawByteString): boolean; overload;
+    /// write raw data to the process stdin pipe
+    function Write(p: pointer; len: PtrInt): boolean; overload;
+    /// write data then close the stdin pipe (signal EOF to the child)
+    // - useful for one-shot input followed by waiting for output and exit
+    function WriteAndCloseStdin(const data: RawByteString): boolean;
+    /// close the stdin pipe, signaling EOF to the child process
+    // - after this call, the child will receive EOF when reading stdin
+    // - idempotent: safe to call multiple times
+    procedure CloseStdin;
+    /// read and consume all currently buffered output from the child
+    // - returns '' if no output is available
+    // - the background reader thread accumulates output; this drains the buffer
+    function ReadAvailable: RawByteString;
+    /// check whether any output data is buffered and ready to read
+    function HasDataAvailable: boolean;
+    /// attempt graceful termination, then hard-kill after waitms
+    // - on Windows: sends Ctrl+C / WM_QUIT, then TerminateProcess
+    // - on POSIX: sends SIGTERM, then SIGKILL
+    // - returns true if the process exited within the timeout
+    function Terminate(waitms: cardinal = 5000): boolean;
+    /// unconditionally hard-kill the process
+    // - on Windows: TerminateProcess; on POSIX: SIGKILL
+    procedure Kill;
+    /// block until the process exits or timeout expires
+    // - returns the exit code, or -1 on timeout
+    function WaitFor(waitms: cardinal = INFINITE): integer;
+    /// whether the process was started and is still running
+    property Running: boolean read GetRunning;
+    /// exit code of the process (valid only after the process has exited)
+    property ExitCode: integer read fExitCode;
+    /// the OS process ID
+    property Pid: cardinal read GetPid;
+    /// optional callback for real-time output notification
+    // - called from the background reader thread with new output chunks
+    // - the return value is ignored (use Terminate to stop the process)
+    // - set before calling Start() if needed
+    property OnOutput: TOnRedirect read fOnOutput write fOnOutput;
+  end;
+
+
 implementation
 
 // those include files hold all OS-specific functions
