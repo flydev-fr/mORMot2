@@ -5135,13 +5135,14 @@ end;
 
 {$ifdef FPC}
 
-procedure ExternalProcessReaderThread(p: pointer);
+function ExternalProcessReaderThread(p: pointer): PtrInt;
 var
   proc: TExternalProcess;
   tmp: TBuffer4K;
   n: ssize_t;
   new: RawUtf8;
 begin
+  result := 0;
   proc := TExternalProcess(p);
   try
     repeat

@@ -4775,13 +4775,14 @@ end;
 
 { TExternalProcess }
 
-procedure ExternalProcessReaderThread(p: pointer);
+function ExternalProcessReaderThread(p: pointer): {$ifdef FPC} PtrInt {$else} Integer {$endif};
 var
   proc: TExternalProcess;
   tmp: TBuffer4K;
   new: RawByteString;
   pending, n: cardinal;
 begin
+  result := 0;
   proc := TExternalProcess(p);
   try
     repeat
@@ -4923,7 +4924,11 @@ begin
     end;
   end;
   // start background reader thread
+  {$ifdef FPC}
   BeginThread(@ExternalProcessReaderThread, self, fReaderThreadID);
+  {$else}
+  BeginThread(nil, 0, @ExternalProcessReaderThread, self, 0, fReaderThreadID);
+  {$endif FPC}
 end;
 
 function TExternalProcess.Write(const data: RawByteString): boolean;
