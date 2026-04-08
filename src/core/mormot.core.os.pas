@@ -6042,11 +6042,17 @@ function RunCommand(const cmd: TRunArg; waitfor: boolean = true;
 // be encoded as name=value#0 pairs
 // - you can specify a wrkdir if the path specified by cmd is not good enough
 // - TRunOptions = RUN_CMD as expected from executing a transient command
+// - if stdinput is not empty, its content will be written to the child process
+// stdin pipe, then the pipe is closed (EOF), before reading the output - this
+// allows e.g. to pipe code to an interpreter like 'node -e' or 'python -c'
+// - warning: for one-shot stdinput, if both input AND output are large (>64KB),
+// a pipe buffer deadlock is possible - consider TExternalProcess for such cases
 // - warning: exitcode^ should be a 32-bit "integer" variable, not a PtrInt
 function RunRedirect(const cmd: TRunArg; exitcode: PInteger = nil;
   const onoutput: TOnRedirect = nil; waitfordelayms: cardinal = INFINITE;
   setresult: boolean = true; const env: TRunArg = '';
-  const wrkdir: TFileName = ''; options: TRunOptions = RUN_CMD): RawByteString;
+  const wrkdir: TFileName = ''; options: TRunOptions = RUN_CMD;
+  const stdinput: RawByteString = ''): RawByteString;
 
 var
   /// a RunRedirect() callback for console output e.g. for debugging purpose
@@ -6077,7 +6083,8 @@ function RunCommandWin(const cmd: TFileName; waitfor: boolean;
   var processinfo: TWinProcessInfo; const env: TFileName = '';
   options: TRunOptions = RUN_CMD; waitfordelayms: cardinal = INFINITE;
   redirected: PRawByteString = nil; const onoutput: TOnRedirect = nil;
-  const wrkdir: TFileName = ''; jobtoclose: PHandle = nil): integer;
+  const wrkdir: TFileName = ''; jobtoclose: PHandle = nil;
+  const stdinput: RawByteString = ''): integer;
 
 {$else}
 type
