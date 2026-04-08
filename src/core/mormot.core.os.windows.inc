@@ -4415,7 +4415,8 @@ end;
 
 function RunRedirect(const cmd: TFileName; exitcode: PInteger;
   const onoutput: TOnRedirect; waitfordelayms: cardinal; setresult: boolean;
-  const env, wrkdir: TFileName; options: TRunOptions): RawByteString;
+  const env, wrkdir: TFileName; options: TRunOptions;
+  const stdinput: RawByteString): RawByteString;
 var
   res: integer;
   redir: PRawByteString;
@@ -4426,7 +4427,7 @@ begin
   if setresult then
     redir := @result;
   res := RunCommandWin(cmd, {wait=}true, processinfo, env, options,
-    waitfordelayms, redir, onoutput, wrkdir);
+    waitfordelayms, redir, onoutput, wrkdir, nil, stdinput);
   if exitcode <> nil then
     exitcode^ := res;
 end;
@@ -4435,12 +4436,14 @@ function RunCommandWin(const cmd: TFileName; waitfor: boolean;
   var processinfo: TWinProcessInfo; const env: TFileName;
   options: TRunOptions; waitfordelayms: cardinal;
   redirected: PRawByteString; const onoutput: TOnRedirect;
-  const wrkdir: TFileName; jobtoclose: PHandle): integer;
+  const wrkdir: TFileName; jobtoclose: PHandle;
+  const stdinput: RawByteString): integer;
 var
   startupinfo: TStartupInfo; // _STARTUPINFOW or _STARTUPINFOA is equal here
   procsec, pipesec: TSecurityAttributes;
   exe, path: TFileName;
   rd, wr, job: THandle;
+  in_rd, in_wr: THandle; // stdin pipe handles (when stdinput is provided)
   // CreateProcess can alter the strings -> use local SynUnicode temp variables
   wcmd, wenv, wpath: SynUnicode;
   endtix: Int64;
@@ -4622,6 +4625,8 @@ begin
   startupinfo.cb := SizeOf(startupinfo);
   l := 0;
   rd := 0;
+  in_rd := 0;
+  in_wr := 0;
   job := 0;
   if Assigned(jobtoclose) then
     jobtoclose^ := job;
@@ -4637,7 +4642,22 @@ begin
       procsec.bInheritHandle := true;
       SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
       startupinfo.wShowWindow := SW_HIDE;
-      startupinfo.hStdInput := GetStdHandle(STD_INPUT_HANDLE);
+      if stdinput <> '' then
+      begin
+        if CreatePipe(in_rd, in_wr, @pipesec, 0) then
+        begin
+          SetHandleInformation(in_wr, HANDLE_FLAG_INHERIT, 0);
+          startupinfo.hStdInput := in_rd;
+        end
+        else
+        begin
+          in_rd := 0;
+          in_wr := 0;
+          startupinfo.hStdInput := GetStdHandle(STD_INPUT_HANDLE);
+        end;
+      end
+      else
+        startupinfo.hStdInput := GetStdHandle(STD_INPUT_HANDLE);
       startupinfo.hStdOutput := wr;
       startupinfo.hStdError := wr;
       startupinfo.dwFlags := STARTF_USESTDHANDLES or STARTF_USESHOWWINDOW;
@@ -4699,6 +4719,19 @@ begin
     end;
     if Assigned(onoutput) then
       onoutput('', processinfo.dwProcessId); // notify started
+    // write stdin input then close the pipe to signal EOF
+    if in_wr <> 0 then
+    begin
+      if stdinput <> '' then
+        FileWriteAll(in_wr, pointer(stdinput), length(stdinput));
+      CloseHandle(in_wr);
+      in_wr := 0;
+    end;
+    if in_rd <> 0 then
+    begin
+      CloseHandle(in_rd); // child has its own copy via inheritance
+      in_rd := 0;
+    end;
     // main wait (and redirect) until the process is finished (or not)
     endtix := 0;
     if waitfordelayms <> INFINITE then
@@ -4723,6 +4756,10 @@ begin
       RedirectOutputAborted({killed=}true);
   finally
     // release the handles created for this process
+    if in_rd <> 0 then
+      CloseHandle(in_rd);
+    if in_wr <> 0 then
+      CloseHandle(in_wr);
     CloseHandle(processinfo.hProcess);
     CloseHandle(processinfo.hThread);
     if rd <> 0 then // CloseHandle(wr) has already be done
