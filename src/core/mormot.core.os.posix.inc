@@ -4924,7 +4924,8 @@ end;
 {$ifdef FPC}
 function RunRedirect(const cmd: TRunArg; exitcode: PInteger;
   const onoutput: TOnRedirect; waitfordelayms: cardinal; setresult: boolean;
-  const env: TRunArg; const wrkdir: TFileName; options: TRunOptions): RawByteString;
+  const env: TRunArg; const wrkdir: TFileName; options: TRunOptions;
+  const stdinput: RawByteString): RawByteString;
 var
   // notes: - FPC popen() allows access to the pid whereas clib popen() won't
   //        - env and options params are not supported by popen() so are ignored
@@ -4935,6 +4936,9 @@ var
   wait: cardinal;
   endtix: Int64;
   tmp: TBuffer64K;
+  stdin_fds, stdout_fds: tfildes; // for fork+pipe when stdinput is provided
+  args: array[0..3] of PAnsiChar;
+  cmdstr: RawUtf8;
 
   function RedirectOutput(killing: boolean; var redir: RawByteString): boolean;
   var
@@ -4968,6 +4972,99 @@ begin
   result := '';
   if wrkdir <> '' then
     ChDir(wrkdir);
+  if stdinput <> '' then
+  begin
+    // bidirectional pipe via fork+execve (popen only supports unidirectional)
+    if fppipe(stdin_fds) <> 0 then
+      exit;
+    if fppipe(stdout_fds) <> 0 then
+    begin
+      fpclose(stdin_fds[0]);
+      fpclose(stdin_fds[1]);
+      exit;
+    end;
+    pid := FpFork;
+    if pid < 0 then
+    begin
+      fpclose(stdin_fds[0]);
+      fpclose(stdin_fds[1]);
+      fpclose(stdout_fds[0]);
+      fpclose(stdout_fds[1]);
+      exit;
+    end;
+    if pid = 0 then
+    begin
+      // child process: set up redirections and exec via shell
+      fpclose(stdin_fds[1]);   // close parent's write end
+      fpclose(stdout_fds[0]);  // close parent's read end
+      fpdup2(stdin_fds[0], 0);    // stdin from pipe
+      fpdup2(stdout_fds[1], 1);   // stdout to pipe
+      fpdup2(stdout_fds[1], 2);   // stderr to stdout pipe
+      fpclose(stdin_fds[0]);
+      fpclose(stdout_fds[1]);
+      cmdstr := cmd;
+      args[0] := '/bin/sh';
+      args[1] := '-c';
+      args[2] := pointer(cmdstr);
+      args[3] := nil;
+      FpExecve('/bin/sh', @args[0], envp);
+      FpExit(127); // exec failed
+    end;
+    // parent process
+    fpclose(stdin_fds[0]);   // don't need read end of stdin
+    fpclose(stdout_fds[1]);  // don't need write end of stdout
+    // write all input then close to signal EOF
+    fpwrite(stdin_fds[1], pointer(stdinput), length(stdinput));
+    fpclose(stdin_fds[1]);
+    // read output using the same loop as popen path
+    fd := stdout_fds[0];
+    if Assigned(onoutput) then
+      onoutput('', pid);
+    wait := 200;
+    endtix := 0;
+    if waitfordelayms <> INFINITE then
+    begin
+      if waitfordelayms < wait then
+        wait := waitfordelayms;
+      endtix := GetTickCount64 + waitfordelayms;
+    end;
+    repeat
+      if not RedirectOutput({killing=}false, result) then
+        break;
+      if (endtix <> 0) and
+         (GetTickCount64 > endtix) then
+      begin
+        if RunAbortTimeoutSecs > 0 then
+          if (ramSigTerm in RunAbortMethods) and
+             (fpkill(pid, SIGTERM) = 0) then
+          begin
+            endtix := GetTickCount64 + RunAbortTimeoutSecs * 1000;
+            repeat
+              wr := FpWaitPid(pid, @res, WNOHANG);
+              RedirectOutput({killing=}true, result);
+              if (wr <> 0) or
+                 (GetTickCount64 > endtix) then
+                break;
+              SleepHiRes(5);
+            until false;
+            if wr = pid then
+              break;
+          end;
+        fpkill(pid, SIGKILL);
+        pid := 0;
+        break;
+      end;
+    until false;
+    fpclose(fd);
+    if pid <> 0 then
+      res := WaitProcess(pid)
+    else
+      res := -1;
+    if exitcode <> nil then
+      exitcode^ := res;
+    exit; // don't fall through to popen path
+  end;
+  // existing popen path below (when stdinput is empty)
   if popen(f, cmd, 'r') <> 0 then // fork and launch cmd - env is ignored by now
     exit;
   fd := TFileRec(f).Handle;
@@ -5024,11 +5121,12 @@ end;
 {$else}
 function RunRedirect(const cmd: TRunArg; exitcode: PInteger;
   const onoutput: TOnRedirect; waitfordelayms: cardinal; setresult: boolean;
-  const env: TRunArg; const wrkdir: TFileName; options: TRunOptions): RawByteString;
+  const env: TRunArg; const wrkdir: TFileName; options: TRunOptions;
+  const stdinput: RawByteString): RawByteString;
 begin
-  result := ''; // not implemented yet on Delphi POSIX - see libc popen()
+  result := ''; // not implemented yet on Delphi POSIX
   if exitcode <> nil then
-    exitcode^ := -1; // error
+    exitcode^ := -1;
 end;
 {$endif FPC}
 
