@@ -11070,40 +11070,113 @@ procedure TTestCoreBase._RunRedirect;
 var
   output: RawByteString;
   exitcode: integer;
+  large: RawByteString;
+  i: integer;
 begin
+  // --- basic stdin pipe tests ---
   {$ifdef OSWINDOWS}
-  // test: pipe input through findstr (echoes matching lines to stdout)
+  // pipe input through findstr (echoes matching lines to stdout)
   output := RunRedirect('findstr /r "."', @exitcode, nil, 10000, true,
     '', '', RUN_CMD, 'hello from stdin');
   Check(exitcode = 0, 'findstr exitcode');
   Check(PosEx('hello from stdin', output) > 0, 'findstr output');
-  // test: pipe input through sort (sorts lines from stdin)
+  // pipe input through sort (sorts lines from stdin)
   output := RunRedirect('sort', @exitcode, nil, 10000, true,
     '', '', RUN_CMD, 'banana' + #13#10 + 'apple' + #13#10 + 'cherry');
   Check(exitcode = 0, 'sort exitcode');
   Check(PosEx('apple', output) > 0, 'sort has apple');
-  // test: empty stdinput should behave like original RunRedirect
+  {$endif OSWINDOWS}
+  {$ifdef OSPOSIX}
+  // pipe input through cat (echoes stdin to stdout)
+  output := RunRedirect('cat', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD, 'hello from stdin');
+  Check(exitcode = 0, 'cat exitcode');
+  Check(PosEx('hello from stdin', output) > 0, 'cat output');
+  // pipe input through wc -l (count lines)
+  output := RunRedirect('wc -l', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD, 'line1' + #10 + 'line2' + #10 + 'line3');
+  Check(exitcode = 0, 'wc exitcode');
+  Check(PosEx('3', TrimU(output)) > 0, 'wc output');
+  {$endif OSPOSIX}
+  // --- backward compatibility: empty stdinput behaves like original ---
+  {$ifdef OSWINDOWS}
   output := RunRedirect('cmd /c echo no_stdin', @exitcode, nil, 10000, true,
     '', '', RUN_CMD, '');
   Check(exitcode = 0, 'no stdin exitcode');
   Check(PosEx('no_stdin', output) > 0, 'no stdin output');
   {$endif OSWINDOWS}
   {$ifdef OSPOSIX}
-  // test: pipe input through cat (echoes stdin to stdout)
-  output := RunRedirect('cat', @exitcode, nil, 10000, true,
-    '', '', RUN_CMD, 'hello from stdin');
-  Check(exitcode = 0, 'cat exitcode');
-  Check(PosEx('hello from stdin', output) > 0, 'cat output');
-  // test: pipe input through wc -l (count lines)
-  output := RunRedirect('wc -l', @exitcode, nil, 10000, true,
-    '', '', RUN_CMD, 'line1' + #10 + 'line2' + #10 + 'line3');
-  Check(exitcode = 0, 'wc exitcode');
-  Check(PosEx('3', TrimU(output)) > 0, 'wc output');
-  // test: empty stdinput should behave like original RunRedirect
   output := RunRedirect('echo no_stdin', @exitcode, nil, 10000, true,
     '', '', RUN_CMD, '');
   Check(exitcode = 0, 'no stdin exitcode');
   Check(PosEx('no_stdin', output) > 0, 'no stdin output');
+  {$endif OSPOSIX}
+  // --- multiline input ---
+  {$ifdef OSWINDOWS}
+  output := RunRedirect('findstr /r "."', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD,
+    'line1' + #13#10 + 'line2' + #13#10 + 'line3' + #13#10);
+  Check(exitcode = 0, 'multiline exitcode');
+  Check(PosEx('line1', output) > 0, 'multiline has line1');
+  Check(PosEx('line2', output) > 0, 'multiline has line2');
+  Check(PosEx('line3', output) > 0, 'multiline has line3');
+  {$endif OSWINDOWS}
+  {$ifdef OSPOSIX}
+  output := RunRedirect('cat', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD,
+    'line1' + #10 + 'line2' + #10 + 'line3' + #10);
+  Check(exitcode = 0, 'multiline exitcode');
+  Check(PosEx('line1', output) > 0, 'multiline has line1');
+  Check(PosEx('line3', output) > 0, 'multiline has line3');
+  {$endif OSPOSIX}
+  // --- binary data: bytes 0..255 round-trip through cat ---
+  {$ifdef OSPOSIX}
+  SetLength(large, 256);
+  for i := 0 to 255 do
+    PByteArray(large)[i] := i;
+  output := RunRedirect('cat', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD, large);
+  Check(exitcode = 0, 'binary exitcode');
+  CheckEqual(length(output), 256, 'binary length');
+  Check(CompareMem(pointer(output), pointer(large), 256), 'binary roundtrip');
+  {$endif OSPOSIX}
+  // --- larger input (32KB) to exercise pipe buffering ---
+  SetLength(large, 32 * 1024);
+  FillCharFast(pointer(large)^, length(large), ord('A'));
+  {$ifdef OSWINDOWS}
+  output := RunRedirect('findstr /r "."', @exitcode, nil, 30000, true,
+    '', '', RUN_CMD, large);
+  Check(exitcode = 0, 'large exitcode');
+  Check(length(output) > 0, 'large output not empty');
+  {$endif OSWINDOWS}
+  {$ifdef OSPOSIX}
+  output := RunRedirect('cat', @exitcode, nil, 30000, true,
+    '', '', RUN_CMD, large);
+  Check(exitcode = 0, 'large exitcode');
+  CheckEqual(length(output), length(large), 'large roundtrip length');
+  {$endif OSPOSIX}
+  // --- exit code propagation from child ---
+  {$ifdef OSWINDOWS}
+  output := RunRedirect('cmd /c exit 42', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD, '');
+  CheckEqual(exitcode, 42, 'exit code 42');
+  {$endif OSWINDOWS}
+  {$ifdef OSPOSIX}
+  output := RunRedirect('sh -c "exit 42"', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD, '');
+  CheckEqual(exitcode, 42, 'exit code 42');
+  {$endif OSPOSIX}
+  // --- stdinput with onoutput callback ---
+  output := '';
+  {$ifdef OSWINDOWS}
+  RunRedirect('findstr /r "."', @exitcode, RedirectToConsole, 10000, false,
+    '', '', RUN_CMD, 'callback test');
+  Check(exitcode = 0, 'callback exitcode');
+  {$endif OSWINDOWS}
+  {$ifdef OSPOSIX}
+  RunRedirect('cat', @exitcode, RedirectToConsole, 10000, false,
+    '', '', RUN_CMD, 'callback test');
+  Check(exitcode = 0, 'callback exitcode');
   {$endif OSPOSIX}
 end;
 
@@ -11112,8 +11185,9 @@ var
   proc: TExternalProcess;
   output: RawByteString;
   i: integer;
+  ec: integer;
 begin
-  // Test 1: simple command with stdin -> stdout
+  // --- 1. basic write + read ---
   proc := TExternalProcess.Create;
   try
     {$ifdef OSWINDOWS}
@@ -11123,17 +11197,20 @@ begin
     Check(proc.Start('cat'), 'start cat');
     {$endif OSPOSIX}
     Check(proc.Running, 'should be running');
+    Check(proc.Pid > 0, 'pid assigned');
     Check(proc.Write('hello world' + #10), 'write');
     proc.CloseStdin;
-    Check(proc.WaitFor(5000) >= 0, 'waitfor');
+    ec := proc.WaitFor(5000);
+    Check(ec >= 0, 'waitfor');
     SleepHiRes(200); // let reader thread drain
     output := proc.ReadAvailable;
     Check(PosEx('hello world', output) > 0, 'output');
     Check(not proc.Running, 'should not be running');
+    CheckEqual(proc.ExitCode, 0, 'exitcode 0');
   finally
     proc.Free;
   end;
-  // Test 2: multiple writes
+  // --- 2. multiple sequential writes ---
   proc := TExternalProcess.Create;
   try
     {$ifdef OSWINDOWS}
@@ -11142,18 +11219,18 @@ begin
     {$ifdef OSPOSIX}
     Check(proc.Start('cat'), 'start cat2');
     {$endif OSPOSIX}
-    for i := 1 to 5 do
+    for i := 1 to 10 do
       Check(proc.Write(Int32ToUtf8(i) + #10), 'write line');
     proc.CloseStdin;
     Check(proc.WaitFor(5000) >= 0, 'waitfor2');
     SleepHiRes(200);
     output := proc.ReadAvailable;
-    for i := 1 to 5 do
+    for i := 1 to 10 do
       Check(PosEx(Int32ToUtf8(i), output) > 0, 'multi output');
   finally
     proc.Free;
   end;
-  // Test 3: WriteAndCloseStdin convenience
+  // --- 3. WriteAndCloseStdin convenience + sorted output verification ---
   proc := TExternalProcess.Create;
   try
     {$ifdef OSWINDOWS}
@@ -11169,11 +11246,15 @@ begin
     Check(proc.WaitFor(5000) >= 0, 'waitfor sort');
     SleepHiRes(200);
     output := proc.ReadAvailable;
-    Check(PosEx('apple', output) > 0, 'sorted output');
+    Check(PosEx('apple', output) > 0, 'sorted has apple');
+    Check(PosEx('banana', output) > 0, 'sorted has banana');
+    Check(PosEx('cherry', output) > 0, 'sorted has cherry');
+    // apple should appear before banana in sorted output
+    Check(PosEx('apple', output) < PosEx('banana', output), 'sort order');
   finally
     proc.Free;
   end;
-  // Test 4: Terminate a long-running process
+  // --- 4. Terminate a long-running process ---
   proc := TExternalProcess.Create;
   try
     {$ifdef OSWINDOWS}
@@ -11183,9 +11264,154 @@ begin
     Check(proc.Start('sleep 60'), 'start sleep');
     {$endif OSPOSIX}
     Check(proc.Running, 'long running');
+    Check(proc.Pid > 0, 'long pid');
     SleepHiRes(500);
     Check(proc.Terminate(3000), 'terminate');
     Check(not proc.Running, 'terminated');
+  finally
+    proc.Free;
+  end;
+  // --- 5. Kill a process ---
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('ping -n 60 127.0.0.1'), 'start ping2');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('sleep 60'), 'start sleep2');
+    {$endif OSPOSIX}
+    Check(proc.Running, 'running before kill');
+    SleepHiRes(300);
+    proc.Kill;
+    Check(not proc.Running, 'not running after kill');
+  finally
+    proc.Free;
+  end;
+  // --- 6. Double Start returns false ---
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('cmd /c echo ok'), 'first start');
+    Check(not proc.Start('cmd /c echo fail'), 'double start');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('echo ok'), 'first start');
+    Check(not proc.Start('echo fail'), 'double start');
+    {$endif OSPOSIX}
+    proc.WaitFor(3000);
+  finally
+    proc.Free;
+  end;
+  // --- 7. CloseStdin is idempotent ---
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('findstr /r "."'), 'start for closestdin');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('cat'), 'start for closestdin');
+    {$endif OSPOSIX}
+    proc.CloseStdin;
+    proc.CloseStdin; // second call should not crash
+    proc.WaitFor(3000);
+    Check(not proc.Running, 'closed stdin process exited');
+  finally
+    proc.Free;
+  end;
+  // --- 8. Write after CloseStdin returns false ---
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('findstr /r "."'), 'start for write-after-close');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('cat'), 'start for write-after-close');
+    {$endif OSPOSIX}
+    proc.CloseStdin;
+    Check(not proc.Write('should fail'), 'write after close');
+    proc.WaitFor(3000);
+  finally
+    proc.Free;
+  end;
+  // --- 9. ReadAvailable returns '' when no data ---
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('ping -n 60 127.0.0.1'), 'start for empty read');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('sleep 60'), 'start for empty read');
+    {$endif OSPOSIX}
+    // immediately try to read before any output
+    output := proc.ReadAvailable;
+    // may or may not have output yet (ping prints header), just check no crash
+    Check(true, 'ReadAvailable did not crash');
+    // HasDataAvailable should not crash either
+    proc.HasDataAvailable;
+    proc.Kill;
+  finally
+    proc.Free;
+  end;
+  // --- 10. WaitFor with timeout returns -1 on timeout ---
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('ping -n 60 127.0.0.1'), 'start for timeout');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('sleep 60'), 'start for timeout');
+    {$endif OSPOSIX}
+    ec := proc.WaitFor(500);
+    CheckEqual(ec, -1, 'waitfor timeout returns -1');
+    Check(proc.Running, 'still running after timeout');
+    proc.Kill;
+  finally
+    proc.Free;
+  end;
+  // --- 11. Destructor cleans up running process (no leak) ---
+  proc := TExternalProcess.Create;
+  {$ifdef OSWINDOWS}
+  proc.Start('ping -n 60 127.0.0.1');
+  {$endif OSWINDOWS}
+  {$ifdef OSPOSIX}
+  proc.Start('sleep 60');
+  {$endif OSPOSIX}
+  Check(proc.Running, 'running before free');
+  proc.Free; // should terminate + cleanup without crash or leak
+  // --- 12. ExitCode from child that returns non-zero ---
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('cmd /c exit 7'), 'start exit7');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('sh -c "exit 7"'), 'start exit7');
+    {$endif OSPOSIX}
+    ec := proc.WaitFor(5000);
+    CheckEqual(ec, 7, 'exit code 7');
+    CheckEqual(proc.ExitCode, 7, 'ExitCode property');
+  finally
+    proc.Free;
+  end;
+  // --- 13. Larger data through pipes (16KB) ---
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('findstr /r "."'), 'start large');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('cat'), 'start large');
+    {$endif OSPOSIX}
+    SetLength(output, 16 * 1024);
+    FillCharFast(pointer(output)^, length(output), ord('X'));
+    // add newline so findstr echoes it
+    output[length(output)] := #10;
+    Check(proc.Write(output), 'large write');
+    proc.CloseStdin;
+    Check(proc.WaitFor(10000) >= 0, 'large waitfor');
+    SleepHiRes(500);
+    output := proc.ReadAvailable;
+    Check(length(output) > 1000, 'large read got data');
   finally
     proc.Free;
   end;
