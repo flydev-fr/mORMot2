@@ -4833,6 +4833,9 @@ var
   wcmd, wenv, wpath: SynUnicode;
   in_rd, out_wr: THandle;
   flags: cardinal;
+  {$ifdef FPC}
+  _tid: PtrUInt; // FPC's BeginThread expects PtrUInt-sized TThreadID, not mORMot's DWord
+  {$endif FPC}
 begin
   result := false;
   if fStarted then
@@ -4930,7 +4933,7 @@ begin
   end;
   // start background reader thread
   {$ifdef FPC}
-  BeginThread(@ExternalProcessReaderThread, self, fReaderThreadID);
+  BeginThread(@ExternalProcessReaderThread, self, _tid);
   {$else}
   fReaderHandle := BeginThread(nil, 0, @ExternalProcessReaderThread, self, 0, fReaderThreadID);
   {$endif FPC}
