@@ -231,6 +231,8 @@ type
     procedure _GUID;
     /// test ParseCommandArgs() functions
     procedure _ParseCommandArgs;
+    /// test RunRedirect() with stdin pipe
+    procedure _RunRedirect;
     /// test TExecutableCommandLine class
     procedure _TExecutableCommandLine;
     /// test IsMatch() function
@@ -11061,6 +11063,47 @@ end;
 
 {$endif OSWINDOWS}
 
+
+procedure TTestCoreBase._RunRedirect;
+var
+  output: RawByteString;
+  exitcode: integer;
+begin
+  {$ifdef OSWINDOWS}
+  // test: pipe input through findstr (echoes matching lines to stdout)
+  output := RunRedirect('findstr /r "."', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD, 'hello from stdin');
+  Check(exitcode = 0, 'findstr exitcode');
+  Check(PosEx('hello from stdin', output) > 0, 'findstr output');
+  // test: pipe input through sort (sorts lines from stdin)
+  output := RunRedirect('sort', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD, 'banana' + #13#10 + 'apple' + #13#10 + 'cherry');
+  Check(exitcode = 0, 'sort exitcode');
+  Check(PosEx('apple', output) > 0, 'sort has apple');
+  // test: empty stdinput should behave like original RunRedirect
+  output := RunRedirect('cmd /c echo no_stdin', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD, '');
+  Check(exitcode = 0, 'no stdin exitcode');
+  Check(PosEx('no_stdin', output) > 0, 'no stdin output');
+  {$endif OSWINDOWS}
+  {$ifdef OSPOSIX}
+  // test: pipe input through cat (echoes stdin to stdout)
+  output := RunRedirect('cat', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD, 'hello from stdin');
+  Check(exitcode = 0, 'cat exitcode');
+  Check(PosEx('hello from stdin', output) > 0, 'cat output');
+  // test: pipe input through wc -l (count lines)
+  output := RunRedirect('wc -l', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD, 'line1' + #10 + 'line2' + #10 + 'line3');
+  Check(exitcode = 0, 'wc exitcode');
+  Check(PosEx('3', TrimU(output)) > 0, 'wc output');
+  // test: empty stdinput should behave like original RunRedirect
+  output := RunRedirect('echo no_stdin', @exitcode, nil, 10000, true,
+    '', '', RUN_CMD, '');
+  Check(exitcode = 0, 'no stdin exitcode');
+  Check(PosEx('no_stdin', output) > 0, 'no stdin output');
+  {$endif OSPOSIX}
+end;
 
 initialization
   {$ifndef HASDYNARRAYTYPE}
