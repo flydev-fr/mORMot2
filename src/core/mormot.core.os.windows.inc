@@ -4814,7 +4814,7 @@ begin
       if Assigned(proc.fOnOutput) then
       begin
         FastSetRawByteString(new, @tmp, n);
-        proc.fOnOutput(new, proc.GetPid);
+        proc.fOnOutput(new, proc.fPid);
       end;
     until false;
   finally
@@ -4911,11 +4911,12 @@ begin
   end;
   fProcess := processinfo.hProcess;
   fThread := processinfo.hThread;
+  fPid := processinfo.dwProcessID;
   fStarted := true;
   // optional job object
   if roWinJobCloseChildren in options then
   begin
-    fJob := CreateJobToClose(processinfo.dwProcessID, 'ExternalProcess', true);
+    fJob := CreateJobToClose(fPid, 'ExternalProcess', true);
     if (fJob <> 0) and
        not AssignJobToProcess(fJob, fProcess, 'ExternalProcess') then
     begin
@@ -4927,7 +4928,7 @@ begin
   {$ifdef FPC}
   BeginThread(@ExternalProcessReaderThread, self, fReaderThreadID);
   {$else}
-  BeginThread(nil, 0, @ExternalProcessReaderThread, self, 0, fReaderThreadID);
+  fReaderHandle := BeginThread(nil, 0, @ExternalProcessReaderThread, self, 0, fReaderThreadID);
   {$endif FPC}
 end;
 
@@ -4992,7 +4993,7 @@ end;
 
 function TExternalProcess.GetPid: cardinal;
 begin
-  result := GetProcessId(fProcess);
+  result := fPid;
 end;
 
 function TExternalProcess.GetOutput: RawByteString;
@@ -5004,14 +5005,20 @@ function TExternalProcess.Terminate(waitms: cardinal): boolean;
 var
   endtix: Int64;
   c: cardinal;
+  ram: TRunAbortMethods;
 begin
   result := not Running;
   if result then
     exit;
+  ram := RunAbortMethods;
+  // Ctrl+C is not compatible with detached/redirected processes
+  if not (roWinNoProcessDetach in fOptions) or
+     (roWinNewConsole in fOptions) then
+    exclude(ram, ramCtrlC);
   endtix := GetTickCount64 + waitms;
-  // try Ctrl+C
-  if ramCtrlC in RunAbortMethods then
-    CancelProcess(GetPid, 0);
+  // try Ctrl+C (only if compatible with process creation flags)
+  if ramCtrlC in ram then
+    CancelProcess(fPid, 0);
   while GetTickCount64 < endtix do
   begin
     if GetExitCodeProcess(fProcess, c) and
@@ -5025,9 +5032,9 @@ begin
     SleepHiRes(50);
   end;
   // try WM_QUIT
-  if ramQuit in RunAbortMethods then
+  if ramQuit in ram then
   begin
-    QuitProcess(GetPid, 0);
+    QuitProcess(fPid, 0);
     endtix := GetTickCount64 + 1000;
     while GetTickCount64 < endtix do
     begin
@@ -5098,13 +5105,20 @@ begin
     if Running then
       Terminate(2000);
     CloseStdin;
+    // close stdout pipe to force reader thread to exit (PeekNamedPipe will fail)
+    if fStdoutRead <> 0 then
+    begin
+      CloseHandle(fStdoutRead);
+      fStdoutRead := 0;
+    end;
     // wait for reader thread to finish
     endtix := GetTickCount64 + 3000;
     while not fReaderFinished and
           (GetTickCount64 < endtix) do
       SleepHiRes(10);
-    if fStdoutRead <> 0 then
-      CloseHandle(fStdoutRead);
+    // close reader thread handle to avoid leak
+    if fReaderHandle <> 0 then
+      CloseHandle(fReaderHandle);
     if fProcess <> 0 then
       CloseHandle(fProcess);
     if fThread <> 0 then

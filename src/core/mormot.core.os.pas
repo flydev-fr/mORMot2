@@ -6123,14 +6123,13 @@ type
     fWorkDir: TFileName;
     fOptions: TRunOptions;
     fOnOutput: TOnRedirect;
+    fPid: cardinal;
     {$ifdef OSWINDOWS}
     fProcess: THandle;
     fThread: THandle;
     fJob: THandle;
+    fReaderHandle: THandle;
     {$endif OSWINDOWS}
-    {$ifdef OSPOSIX}
-    fPid: cardinal;
-    {$endif OSPOSIX}
     fStdinWrite: THandle;
     fStdoutRead: THandle;
     fReaderThreadID: TThreadID;
