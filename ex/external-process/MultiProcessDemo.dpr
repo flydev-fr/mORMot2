@@ -260,10 +260,9 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// Bonus: demonstrate roWinNewProcessGroup flag (Windows-only)
+// demonstrate roWinNewProcessGroup flag (Windows-only)
 // Creating a process with its own group lets you send CTRL_BREAK_EVENT to
 // just that pid via GenerateConsoleCtrlEvent(), without affecting siblings.
-// This is the second approach mentioned in the original feature request.
 // ---------------------------------------------------------------------------
 {$ifdef OSWINDOWS}
 procedure Demo_NewProcessGroup;
@@ -272,7 +271,7 @@ var
 begin
   WriteLn2('%', ['']);
   WriteLn2('=============================================================', []);
-  WriteLn2(' Bonus: roWinNewProcessGroup flag (Windows)', []);
+  WriteLn2(' roWinNewProcessGroup flag (Windows)', []);
   WriteLn2('=============================================================%', [#10]);
 
   proc := TExternalProcess.Create;
