@@ -11415,6 +11415,49 @@ begin
   finally
     proc.Free;
   end;
+  // --- 14. Polling Running captures ExitCode on natural exit
+  //     (regression test: without the fix, ExitCode stayed at -1
+  //     when the process exited on its own and only Running was polled,
+  //     never WaitFor) ---
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('cmd /c exit 42'), 'start exit42');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('sh -c "exit 42"'), 'start exit42');
+    {$endif OSPOSIX}
+    // poll Running until process exits on its own (NO WaitFor call)
+    i := 0;
+    while proc.Running and
+          (i < 100) do // up to 10 seconds
+    begin
+      SleepHiRes(100);
+      inc(i);
+    end;
+    Check(not proc.Running, 'exited naturally');
+    // ExitCode must be captured via Running alone (without WaitFor)
+    CheckEqual(proc.ExitCode, 42, 'ExitCode captured by Running');
+  finally
+    proc.Free;
+  end;
+  // --- 15. Terminate() on already-exited process reports correct ExitCode
+  //     (regression: Terminate used to return with fExitCode=-1 when the
+  //     child finished before Terminate was called) ---
+  proc := TExternalProcess.Create;
+  try
+    {$ifdef OSWINDOWS}
+    Check(proc.Start('cmd /c exit 3'), 'start exit3');
+    {$endif OSWINDOWS}
+    {$ifdef OSPOSIX}
+    Check(proc.Start('sh -c "exit 3"'), 'start exit3');
+    {$endif OSPOSIX}
+    SleepHiRes(500); // let the tiny child finish on its own
+    Check(proc.Terminate(1000), 'terminate already-exited');
+    CheckEqual(proc.ExitCode, 3, 'ExitCode after Terminate on exited');
+  finally
+    proc.Free;
+  end;
 end;
 
 initialization

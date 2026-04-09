@@ -5302,11 +5302,22 @@ end;
 
 function TExternalProcess.GetRunning: boolean;
 var
-  res: cint;
+  res, wr: cint;
 begin
-  result := fStarted and
-            not fTerminated and
-            (FpWaitPid(fPid, @res, WNOHANG) = 0);
+  result := false;
+  if not fStarted or
+     fTerminated then
+    exit;
+  wr := FpWaitPid(fPid, @res, WNOHANG);
+  if wr = 0 then
+    result := true // still running
+  else if wr = fPid then
+  begin
+    // process has exited naturally - capture the status
+    fExitCode := res shr 8; // WEXITSTATUS
+    fTerminated := true;
+  end;
+  // wr < 0 = error - returns false
 end;
 
 function TExternalProcess.GetPid: cardinal;

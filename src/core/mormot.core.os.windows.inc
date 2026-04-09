@@ -4992,10 +4992,20 @@ function TExternalProcess.GetRunning: boolean;
 var
   c: cardinal;
 begin
-  result := fStarted and
-            not fTerminated and
-            GetExitCodeProcess(fProcess, c) and
-            (c = STILL_ACTIVE);
+  result := false;
+  if not fStarted or
+     fTerminated then
+    exit;
+  if not GetExitCodeProcess(fProcess, c) then
+    exit;
+  if c = STILL_ACTIVE then
+    result := true
+  else
+  begin
+    // process has exited naturally - capture the exit code
+    fExitCode := c;
+    fTerminated := true;
+  end;
 end;
 
 function TExternalProcess.GetPid: cardinal;

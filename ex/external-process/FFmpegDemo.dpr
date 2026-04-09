@@ -122,8 +122,8 @@ begin
   // -nostats reduces noise; we still see the frame counter via -progress
   cmd := ff +
     ' -y -hide_banner -loglevel info' +
-    ' -f lavfi -i testsrc=duration=' + IntToStr(RUN_SECONDS) +
-    ':size=640x480:rate=30' +
+    ' -re -f lavfi -i testsrc=size=640x480:rate=30' +
+    ' -t ' + IntToStr(RUN_SECONDS) +
     ' -c:v libx264 -preset ultrafast -f null -';
   WriteLn2('> Command:%  %%', [#10, cmd, #10]);
 
@@ -188,10 +188,17 @@ var
 begin
   result.Name := name;
   result.StartTix := GetTickCount64;
+  // -re forces real-time reading from lavfi (1 frame per wall-clock
+  //   interval) so the encoding takes wall-clock time, not "as fast as
+  //   possible" - without this, x264 ultrafast finishes the whole 15
+  //   seconds of synthetic video in well under a second on modern CPUs
+  // -t sets the output duration and works with all lavfi sources,
+  //   including mandelbrot (which doesn't accept the filter-level
+  //   :duration= parameter)
   cmd := ff +
     ' -y -hide_banner -loglevel info' +
-    ' -f lavfi -i "' + Utf8ToString(source) + ':duration=' +
-    IntToStr(RUN_SECONDS) + '"' +
+    ' -re -f lavfi -i "' + Utf8ToString(source) + '"' +
+    ' -t ' + IntToStr(RUN_SECONDS) +
     ' -c:v libx264 -preset ultrafast -f null -';
   result.Proc := TExternalProcess.Create;
   if not result.Proc.Start(cmd) then
@@ -212,11 +219,11 @@ begin
   // Three different synthetic sources, each in its own ffmpeg process.
   // Real-world: imagine 3 RTSP/HLS capture streams on 3 "decks".
   decks[0] := StartEncoder(ff, 'Deck1-testsrc',
-    'testsrc=size=320x240:rate=30');
+    'testsrc=size=640x480:rate=30');
   decks[1] := StartEncoder(ff, 'Deck2-smptebars',
-    'smptebars=size=320x240:rate=30');
+    'smptebars=size=640x480:rate=30');
   decks[2] := StartEncoder(ff, 'Deck3-mandelbrot',
-    'mandelbrot=size=320x240:rate=30');
+    'mandelbrot=size=640x480:rate=30');
 
   try
     for i := 0 to high(decks) do
@@ -296,8 +303,8 @@ begin
 
   cmd := ff +
     ' -y -hide_banner -loglevel info' +
-    ' -f lavfi -i testsrc=duration=30:size=320x240:rate=30' +
-    ' -c:v libx264 -preset ultrafast -f null -';
+    ' -re -f lavfi -i testsrc=size=640x480:rate=30' +
+    ' -t 30 -c:v libx264 -preset ultrafast -f null -';
 
   // A) graceful
   WriteLn2('> Run A: graceful "q" shutdown...', []);
