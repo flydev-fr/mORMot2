@@ -4415,7 +4415,8 @@ end;
 
 function RunRedirect(const cmd: TFileName; exitcode: PInteger;
   const onoutput: TOnRedirect; waitfordelayms: cardinal; setresult: boolean;
-  const env, wrkdir: TFileName; options: TRunOptions): RawByteString;
+  const env, wrkdir: TFileName; options: TRunOptions;
+  const stdinput: RawByteString): RawByteString;
 var
   res: integer;
   redir: PRawByteString;
@@ -4426,7 +4427,7 @@ begin
   if setresult then
     redir := @result;
   res := RunCommandWin(cmd, {wait=}true, processinfo, env, options,
-    waitfordelayms, redir, onoutput, wrkdir);
+    waitfordelayms, redir, onoutput, wrkdir, nil, stdinput);
   if exitcode <> nil then
     exitcode^ := res;
 end;
@@ -4435,12 +4436,14 @@ function RunCommandWin(const cmd: TFileName; waitfor: boolean;
   var processinfo: TWinProcessInfo; const env: TFileName;
   options: TRunOptions; waitfordelayms: cardinal;
   redirected: PRawByteString; const onoutput: TOnRedirect;
-  const wrkdir: TFileName; jobtoclose: PHandle): integer;
+  const wrkdir: TFileName; jobtoclose: PHandle;
+  const stdinput: RawByteString): integer;
 var
   startupinfo: TStartupInfo; // _STARTUPINFOW or _STARTUPINFOA is equal here
   procsec, pipesec: TSecurityAttributes;
   exe, path: TFileName;
   rd, wr, job: THandle;
+  in_rd, in_wr: THandle; // stdin pipe handles (when stdinput is provided)
   // CreateProcess can alter the strings -> use local SynUnicode temp variables
   wcmd, wenv, wpath: SynUnicode;
   endtix: Int64;
@@ -4622,6 +4625,8 @@ begin
   startupinfo.cb := SizeOf(startupinfo);
   l := 0;
   rd := 0;
+  in_rd := 0;
+  in_wr := 0;
   job := 0;
   if Assigned(jobtoclose) then
     jobtoclose^ := job;
@@ -4637,7 +4642,22 @@ begin
       procsec.bInheritHandle := true;
       SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
       startupinfo.wShowWindow := SW_HIDE;
-      startupinfo.hStdInput := GetStdHandle(STD_INPUT_HANDLE);
+      if stdinput <> '' then
+      begin
+        if CreatePipe(in_rd, in_wr, @pipesec, 0) then
+        begin
+          SetHandleInformation(in_wr, HANDLE_FLAG_INHERIT, 0);
+          startupinfo.hStdInput := in_rd;
+        end
+        else
+        begin
+          in_rd := 0;
+          in_wr := 0;
+          startupinfo.hStdInput := GetStdHandle(STD_INPUT_HANDLE);
+        end;
+      end
+      else
+        startupinfo.hStdInput := GetStdHandle(STD_INPUT_HANDLE);
       startupinfo.hStdOutput := wr;
       startupinfo.hStdError := wr;
       startupinfo.dwFlags := STARTF_USESTDHANDLES or STARTF_USESHOWWINDOW;
@@ -4664,6 +4684,8 @@ begin
     flags := (flags or CREATE_NEW_CONSOLE) and not DETACHED_PROCESS;
     exclude(ram, ramCtrlC); // not compatible with stand-alone console
   end;
+  if roWinNewProcessGroup in options then
+    flags := flags or CREATE_NEW_PROCESS_GROUP;
   if roWinJobCloseChildren in options then
     flags := flags or CREATE_BREAKAWAY_FROM_JOB; // child process in a new job
   // actually create the new process
@@ -4699,6 +4721,19 @@ begin
     end;
     if Assigned(onoutput) then
       onoutput('', processinfo.dwProcessId); // notify started
+    // write stdin input then close the pipe to signal EOF
+    if in_wr <> 0 then
+    begin
+      if stdinput <> '' then
+        FileWriteAll(in_wr, pointer(stdinput), length(stdinput));
+      CloseHandle(in_wr);
+      in_wr := 0;
+    end;
+    if in_rd <> 0 then
+    begin
+      CloseHandle(in_rd); // child has its own copy via inheritance
+      in_rd := 0;
+    end;
     // main wait (and redirect) until the process is finished (or not)
     endtix := 0;
     if waitfordelayms <> INFINITE then
@@ -4723,6 +4758,10 @@ begin
       RedirectOutputAborted({killed=}true);
   finally
     // release the handles created for this process
+    if in_rd <> 0 then
+      CloseHandle(in_rd);
+    if in_wr <> 0 then
+      CloseHandle(in_wr);
     CloseHandle(processinfo.hProcess);
     CloseHandle(processinfo.hThread);
     if rd <> 0 then // CloseHandle(wr) has already be done
@@ -4733,6 +4772,378 @@ begin
   end
   else
     ReturnLastError('CreateProcessW', flags);
+end;
+
+
+{ TExternalProcess }
+
+function ExternalProcessReaderThread(p: pointer): {$ifdef FPC} PtrInt {$else} Integer {$endif};
+var
+  proc: TExternalProcess;
+  tmp: TBuffer4K;
+  new: RawByteString;
+  pending, n: cardinal;
+begin
+  result := 0;
+  proc := TExternalProcess(p);
+  try
+    repeat
+      if proc.fStdoutRead = 0 then
+        break;
+      pending := 0;
+      if not PeekNamedPipe(proc.fStdoutRead, nil, 0, nil, @pending, nil) then
+        break; // pipe closed or error
+      if pending = 0 then
+      begin
+        SleepHiRes(10); // no data available, brief sleep
+        continue;
+      end;
+      if pending > SizeOf(tmp) then
+        pending := SizeOf(tmp);
+      n := 0;
+      if not ReadFile(proc.fStdoutRead, tmp, pending, n, nil) or
+         (n = 0) then
+        break; // pipe closed
+      // append to the output buffer
+      proc.fOutputSafe.Lock;
+      try
+        SetLength(proc.fOutput, Length(proc.fOutput) + PtrInt(n));
+        MoveFast(tmp, PByteArray(proc.fOutput)[Length(proc.fOutput) - PtrInt(n)], n);
+      finally
+        proc.fOutputSafe.UnLock;
+      end;
+      // notify callback if assigned
+      if Assigned(proc.fOnOutput) then
+      begin
+        FastSetRawByteString(new, @tmp, n);
+        proc.fOnOutput(new, proc.fPid);
+      end;
+    until false;
+  finally
+    proc.fReaderFinished := true;
+  end;
+end;
+
+function TExternalProcess.Start(const cmd: TRunArg; const env: TRunArg;
+  const wrkdir: TFileName; options: TRunOptions): boolean;
+var
+  startupinfo: TStartupInfo;
+  processinfo: TProcessInformation;
+  procsec, pipesec: TSecurityAttributes;
+  wcmd, wenv, wpath: SynUnicode;
+  in_rd, out_wr: THandle;
+  flags: cardinal;
+  {$ifdef FPC}
+  _tid: PtrUInt; // FPC's BeginThread expects PtrUInt-sized TThreadID, not mORMot's DWord
+  {$endif FPC}
+begin
+  result := false;
+  if fStarted then
+    exit; // already started
+  fCommand := cmd;
+  fWorkDir := wrkdir;
+  fOptions := options;
+  fExitCode := -1;
+  fTerminated := false;
+  fReaderFinished := false;
+  fOutput := '';
+  // security attributes for inheritable handles
+  FillCharFast(procsec, SizeOf(procsec), 0);
+  procsec.nLength := SizeOf(procsec);
+  procsec.bInheritHandle := true;
+  FillCharFast(pipesec, SizeOf(pipesec), 0);
+  pipesec.nLength := SizeOf(pipesec);
+  pipesec.bInheritHandle := true;
+  // create stdin pipe: child reads from in_rd, parent writes to fStdinWrite
+  if not CreatePipe(in_rd, fStdinWrite, @pipesec, 0) then
+    exit;
+  SetHandleInformation(fStdinWrite, HANDLE_FLAG_INHERIT, 0);
+  // create stdout pipe: child writes to out_wr, parent reads from fStdoutRead
+  if not CreatePipe(fStdoutRead, out_wr, @pipesec, 0) then
+  begin
+    CloseHandle(in_rd);
+    CloseHandle(fStdinWrite);
+    fStdinWrite := 0;
+    exit;
+  end;
+  SetHandleInformation(fStdoutRead, HANDLE_FLAG_INHERIT, 0);
+  // prepare startup info
+  FillCharFast(startupinfo, SizeOf(startupinfo), 0);
+  startupinfo.cb := SizeOf(startupinfo);
+  startupinfo.hStdInput := in_rd;
+  startupinfo.hStdOutput := out_wr;
+  startupinfo.hStdError := out_wr;
+  startupinfo.dwFlags := STARTF_USESTDHANDLES or STARTF_USESHOWWINDOW;
+  startupinfo.wShowWindow := SW_HIDE;
+  // prepare CreateProcess arguments
+  wcmd := SynUnicode(cmd);
+  UniqueString(wcmd);
+  wpath := SynUnicode(wrkdir);
+  if env <> '' then
+  begin
+    wenv := SynUnicode(env);
+    if roEnvAddExisting in options then
+    begin
+      if _SystemEnvUnicode = '' then
+        _GetSystemEnv;
+      wenv := _SystemEnvUnicode + wenv;
+    end
+    else
+      UniqueString(wenv);
+  end;
+  // process creation flags
+  flags := CREATE_UNICODE_ENVIRONMENT or CREATE_DEFAULT_ERROR_MODE;
+  if not (roWinNoProcessDetach in options) then
+    flags := flags or (DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP);
+  if roWinNewConsole in options then
+    flags := (flags or CREATE_NEW_CONSOLE) and not DETACHED_PROCESS;
+  if roWinNewProcessGroup in options then
+    flags := flags or CREATE_NEW_PROCESS_GROUP;
+  if roWinJobCloseChildren in options then
+    flags := flags or CREATE_BREAKAWAY_FROM_JOB;
+  // create the process
+  FillCharFast(processinfo, SizeOf(processinfo), 0);
+  result := CreateProcessW(nil, pointer(wcmd), @procsec, @procsec, true,
+    flags, pointer({%H-}wenv), pointer(wpath), startupinfo, processinfo);
+  // close the child-side pipe ends (parent doesn't need them)
+  CloseHandle(in_rd);
+  CloseHandle(out_wr);
+  if not result then
+  begin
+    CloseHandle(fStdinWrite);
+    CloseHandle(fStdoutRead);
+    fStdinWrite := 0;
+    fStdoutRead := 0;
+    exit;
+  end;
+  fProcess := processinfo.hProcess;
+  fThread := processinfo.hThread;
+  fPid := processinfo.dwProcessID;
+  fStarted := true;
+  // optional job object
+  if roWinJobCloseChildren in options then
+  begin
+    fJob := CreateJobToClose(fPid, 'ExternalProcess', true);
+    if (fJob <> 0) and
+       not AssignJobToProcess(fJob, fProcess, 'ExternalProcess') then
+    begin
+      CloseHandle(fJob);
+      fJob := 0;
+    end;
+  end;
+  // start background reader thread
+  {$ifdef FPC}
+  BeginThread(@ExternalProcessReaderThread, self, _tid);
+  {$else}
+  fReaderHandle := BeginThread(nil, 0, @ExternalProcessReaderThread, self, 0, fReaderThreadID);
+  {$endif FPC}
+end;
+
+function TExternalProcess.Write(const data: RawByteString): boolean;
+begin
+  result := Write(pointer(data), length(data));
+end;
+
+function TExternalProcess.Write(p: pointer; len: PtrInt): boolean;
+begin
+  result := (fStdinWrite <> 0) and
+            (p <> nil) and
+            (len > 0) and
+            FileWriteAll(fStdinWrite, p, len);
+end;
+
+function TExternalProcess.WriteAndCloseStdin(const data: RawByteString): boolean;
+begin
+  result := Write(data);
+  CloseStdin;
+end;
+
+procedure TExternalProcess.CloseStdin;
+begin
+  if fStdinWrite <> 0 then
+  begin
+    CloseHandle(fStdinWrite);
+    fStdinWrite := 0;
+  end;
+end;
+
+function TExternalProcess.ReadAvailable: RawByteString;
+begin
+  fOutputSafe.Lock;
+  try
+    result := fOutput;
+    fOutput := '';
+  finally
+    fOutputSafe.UnLock;
+  end;
+end;
+
+function TExternalProcess.HasDataAvailable: boolean;
+begin
+  fOutputSafe.Lock;
+  try
+    result := fOutput <> '';
+  finally
+    fOutputSafe.UnLock;
+  end;
+end;
+
+function TExternalProcess.GetRunning: boolean;
+var
+  c: cardinal;
+begin
+  result := false;
+  if not fStarted or
+     fTerminated then
+    exit;
+  if not GetExitCodeProcess(fProcess, c) then
+    exit;
+  if c = STILL_ACTIVE then
+    result := true
+  else
+  begin
+    // process has exited naturally - capture the exit code
+    fExitCode := c;
+    fTerminated := true;
+  end;
+end;
+
+function TExternalProcess.GetPid: cardinal;
+begin
+  result := fPid;
+end;
+
+function TExternalProcess.GetOutput: RawByteString;
+begin
+  result := ReadAvailable;
+end;
+
+function TExternalProcess.Terminate(waitms: cardinal): boolean;
+var
+  endtix: Int64;
+  c: cardinal;
+  ram: TRunAbortMethods;
+begin
+  result := not Running;
+  if result then
+    exit;
+  ram := RunAbortMethods;
+  // Ctrl+C is not compatible with detached/redirected processes
+  if not (roWinNoProcessDetach in fOptions) or
+     (roWinNewConsole in fOptions) then
+    exclude(ram, ramCtrlC);
+  endtix := GetTickCount64 + waitms;
+  // try Ctrl+C (only if compatible with process creation flags)
+  if ramCtrlC in ram then
+    CancelProcess(fPid, 0);
+  while GetTickCount64 < endtix do
+  begin
+    if GetExitCodeProcess(fProcess, c) and
+       (c <> STILL_ACTIVE) then
+    begin
+      fExitCode := c;
+      fTerminated := true;
+      result := true;
+      exit;
+    end;
+    SleepHiRes(50);
+  end;
+  // try WM_QUIT
+  if ramQuit in ram then
+  begin
+    QuitProcess(fPid, 0);
+    endtix := GetTickCount64 + 1000;
+    while GetTickCount64 < endtix do
+    begin
+      if GetExitCodeProcess(fProcess, c) and
+         (c <> STILL_ACTIVE) then
+      begin
+        fExitCode := c;
+        fTerminated := true;
+        result := true;
+        exit;
+      end;
+      SleepHiRes(50);
+    end;
+  end;
+  // hard kill
+  Kill;
+  result := true;
+end;
+
+procedure TExternalProcess.Kill;
+begin
+  if fStarted and
+     not fTerminated then
+  begin
+    TerminateProcess(fProcess, 255);
+    fExitCode := 255;
+    fTerminated := true;
+  end;
+end;
+
+function TExternalProcess.WaitFor(waitms: cardinal): integer;
+var
+  endtix: Int64;
+  c: cardinal;
+begin
+  result := -1;
+  if not fStarted then
+    exit;
+  if fTerminated then
+  begin
+    result := fExitCode;
+    exit;
+  end;
+  if waitms = INFINITE then
+    endtix := 0
+  else
+    endtix := GetTickCount64 + waitms;
+  repeat
+    if GetExitCodeProcess(fProcess, c) and
+       (c <> STILL_ACTIVE) then
+    begin
+      fExitCode := c;
+      fTerminated := true;
+      result := fExitCode;
+      exit;
+    end;
+    SleepHiRes(50);
+  until (endtix <> 0) and
+        (GetTickCount64 > endtix);
+end;
+
+destructor TExternalProcess.Destroy;
+var
+  endtix: Int64;
+begin
+  if fStarted then
+  begin
+    if Running then
+      Terminate(2000);
+    CloseStdin;
+    // close stdout pipe to force reader thread to exit (PeekNamedPipe will fail)
+    if fStdoutRead <> 0 then
+    begin
+      CloseHandle(fStdoutRead);
+      fStdoutRead := 0;
+    end;
+    // wait for reader thread to finish
+    endtix := GetTickCount64 + 3000;
+    while not fReaderFinished and
+          (GetTickCount64 < endtix) do
+      SleepHiRes(10);
+    // close reader thread handle to avoid leak
+    if fReaderHandle <> 0 then
+      CloseHandle(fReaderHandle);
+    if fProcess <> 0 then
+      CloseHandle(fProcess);
+    if fThread <> 0 then
+      CloseHandle(fThread);
+    if fJob <> 0 then
+      CloseHandle(fJob);
+  end;
+  inherited Destroy;
 end;
 
 

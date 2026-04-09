@@ -5987,12 +5987,17 @@ type
   // roWinNoProcessDetach is defined - e.g. as RUN_CMD for RunCommand/RunRedirect
   // - roWinNewConsole won't inherit the parent console, but have its own console
   // - roWinKeepProcessOnTimeout won't make Ctrl+C / WM_QUIT or TerminateProcess
+  // - roWinNewProcessGroup creates the child in a new process group via
+  // CREATE_NEW_PROCESS_GROUP, allowing targeted GenerateConsoleCtrlEvent()
+  // to that specific process without affecting siblings - useful e.g. for
+  // graceful shutdown of multiple concurrent FFmpeg instances
   TRunOptions = set of (
     roEnvAddExisting,
     roWinJobCloseChildren,
     roWinNoProcessDetach,
     roWinNewConsole,
-    roWinKeepProcessOnTimeout);
+    roWinKeepProcessOnTimeout,
+    roWinNewProcessGroup);
 
 const
   /// the default options for RunCommand() and RunRedirect() transient execution
@@ -6042,11 +6047,17 @@ function RunCommand(const cmd: TRunArg; waitfor: boolean = true;
 // be encoded as name=value#0 pairs
 // - you can specify a wrkdir if the path specified by cmd is not good enough
 // - TRunOptions = RUN_CMD as expected from executing a transient command
+// - if stdinput is not empty, its content will be written to the child process
+// stdin pipe, then the pipe is closed (EOF), before reading the output - this
+// allows e.g. to pipe code to an interpreter like 'node -e' or 'python -c'
+// - warning: for one-shot stdinput, if both input AND output are large (>64KB),
+// a pipe buffer deadlock is possible - consider TExternalProcess for such cases
 // - warning: exitcode^ should be a 32-bit "integer" variable, not a PtrInt
 function RunRedirect(const cmd: TRunArg; exitcode: PInteger = nil;
   const onoutput: TOnRedirect = nil; waitfordelayms: cardinal = INFINITE;
   setresult: boolean = true; const env: TRunArg = '';
-  const wrkdir: TFileName = ''; options: TRunOptions = RUN_CMD): RawByteString;
+  const wrkdir: TFileName = ''; options: TRunOptions = RUN_CMD;
+  const stdinput: RawByteString = ''): RawByteString;
 
 var
   /// a RunRedirect() callback for console output e.g. for debugging purpose
@@ -6077,7 +6088,8 @@ function RunCommandWin(const cmd: TFileName; waitfor: boolean;
   var processinfo: TWinProcessInfo; const env: TFileName = '';
   options: TRunOptions = RUN_CMD; waitfordelayms: cardinal = INFINITE;
   redirected: PRawByteString = nil; const onoutput: TOnRedirect = nil;
-  const wrkdir: TFileName = ''; jobtoclose: PHandle = nil): integer;
+  const wrkdir: TFileName = ''; jobtoclose: PHandle = nil;
+  const stdinput: RawByteString = ''): integer;
 
 {$else}
 type
@@ -6097,6 +6109,94 @@ var
   /// global variable to define RunRedirect/RunCommand soft termination methods
   // - used before hard SIGKILL/TerminateProcess
   RunAbortMethods: TRunAbortMethods = RUNABORT_DEFAULT;
+
+
+{ ****************** TExternalProcess - Interactive Process with Bidirectional Pipes }
+
+type
+  /// interactive child process with bidirectional stdin/stdout pipes
+  // - unlike RunRedirect() which is a one-shot call, TExternalProcess allows
+  // ongoing communication with a long-lived process (REPL, FFmpeg, etc.)
+  // - a background reader thread continuously drains the child's stdout to
+  // prevent pipe-buffer deadlocks when both sides are writing
+  // - writing to stdin is done explicitly via Write() or WriteAndCloseStdin()
+  // - typical use: Start('node -i'), then Write('2+3\n'), ReadAvailable()
+  // - for FFmpeg graceful shutdown: Write('q'#10) then WaitFor()
+  TExternalProcess = class(TSynPersistent)
+  protected
+    fCommand: TRunArg;
+    fWorkDir: TFileName;
+    fOptions: TRunOptions;
+    fOnOutput: TOnRedirect;
+    fPid: cardinal;
+    {$ifdef OSWINDOWS}
+    fProcess: THandle;
+    fThread: THandle;
+    fJob: THandle;
+    fReaderHandle: THandle;
+    {$endif OSWINDOWS}
+    fStdinWrite: THandle;
+    fStdoutRead: THandle;
+    fReaderThreadID: TThreadID;
+    fReaderFinished: boolean;
+    fOutput: RawByteString;
+    fOutputSafe: TLightLock;
+    fExitCode: integer;
+    fStarted: boolean;
+    fTerminated: boolean;
+    function GetRunning: boolean;
+    function GetPid: cardinal;
+    function GetOutput: RawByteString;
+  public
+    /// release all handles and terminate the child process if still running
+    destructor Destroy; override;
+    /// start a new external process with bidirectional stdin/stdout pipes
+    // - returns true on success, false if the process could not be started
+    // - cmd is the full command line (executable + arguments)
+    // - options follows the same convention as RunRedirect()
+    function Start(const cmd: TRunArg; const env: TRunArg = '';
+      const wrkdir: TFileName = ''; options: TRunOptions = RUN_CMD): boolean;
+    /// write raw data to the process stdin pipe
+    // - returns true if all bytes were written, false on error (e.g. broken pipe)
+    function Write(const data: RawByteString): boolean; overload;
+    /// write raw data to the process stdin pipe
+    function Write(p: pointer; len: PtrInt): boolean; overload;
+    /// write data then close the stdin pipe (signal EOF to the child)
+    // - useful for one-shot input followed by waiting for output and exit
+    function WriteAndCloseStdin(const data: RawByteString): boolean;
+    /// close the stdin pipe, signaling EOF to the child process
+    // - after this call, the child will receive EOF when reading stdin
+    // - idempotent: safe to call multiple times
+    procedure CloseStdin;
+    /// read and consume all currently buffered output from the child
+    // - returns '' if no output is available
+    // - the background reader thread accumulates output; this drains the buffer
+    function ReadAvailable: RawByteString;
+    /// check whether any output data is buffered and ready to read
+    function HasDataAvailable: boolean;
+    /// attempt graceful termination, then hard-kill after waitms
+    // - on Windows: sends Ctrl+C / WM_QUIT, then TerminateProcess
+    // - on POSIX: sends SIGTERM, then SIGKILL
+    // - returns true if the process exited within the timeout
+    function Terminate(waitms: cardinal = 5000): boolean;
+    /// unconditionally hard-kill the process
+    // - on Windows: TerminateProcess; on POSIX: SIGKILL
+    procedure Kill;
+    /// block until the process exits or timeout expires
+    // - returns the exit code, or -1 on timeout
+    function WaitFor(waitms: cardinal = INFINITE): integer;
+    /// whether the process was started and is still running
+    property Running: boolean read GetRunning;
+    /// exit code of the process (valid only after the process has exited)
+    property ExitCode: integer read fExitCode;
+    /// the OS process ID
+    property Pid: cardinal read GetPid;
+    /// optional callback for real-time output notification
+    // - called from the background reader thread with new output chunks
+    // - the return value is ignored (use Terminate to stop the process)
+    // - set before calling Start() if needed
+    property OnOutput: TOnRedirect read fOnOutput write fOnOutput;
+  end;
 
 
 implementation
