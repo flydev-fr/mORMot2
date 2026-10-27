@@ -1,0 +1,8 @@
+/.build/
+/*.res
+/*.dproj.local
+/*.identcache
+/*.log
+/*.json
+/__history/
+/__recovery/

@@ -1,0 +1,17 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <ProjectGuid>{014BD326-61AB-43E7-94A1-D12BBA7AE5A7}</ProjectGuid>
+    <MainSource>mormot2tests.dpr</MainSource><ProjectName>mormot2tests</ProjectName>
+    <ProjectVersion>20.5</ProjectVersion><Base>True</Base><AppType>Console</AppType>
+    <Config>Release</Config><Platform>Win64</Platform>
+    <DCC_UnitSearchPath>..\..\src;..\..\src\app;..\..\src\backup;..\..\src\core;..\..\src\crypt;..\..\src\db;..\..\src\ddd;..\..\src\lib;..\..\src\misc;..\..\src\net;..\..\src\orm;..\..\src\rest;..\..\src\script;..\..\src\soa;..\..\src\tools;..\..\src\ui;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+    <DCC_IncludePath>..\..\src;..\..\src\core;..\..\src\net</DCC_IncludePath>
+    <DCC_Namespace>System;Winapi;System.Win;Xml;Data;Datasnap;Web;Soap;$(DCC_Namespace)</DCC_Namespace>
+    <DCC_Define>PUREMORMOT2;NO_UI;NOSETTHREADNAME;$(DCC_Define)</DCC_Define>
+    <DCC_ExeOutput>..\..\scratch\run</DCC_ExeOutput>
+    <DCC_DcuOutput>.build\$(Platform)</DCC_DcuOutput>
+    <DCC_Optimize>true</DCC_Optimize>
+  </PropertyGroup>
+  <ItemGroup><DelphiCompile Include="$(MainSource)"><MainSource>MainSource</MainSource></DelphiCompile></ItemGroup>
+  <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" />
+</Project>
