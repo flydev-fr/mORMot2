@@ -1,0 +1,17 @@
+/.build/
+/mormot2tests
+/*.exe
+/*.dcu
+/*.o
+/*.ppu
+/*.res
+/*.otares
+/*.map
+/*.rsm
+/*.tds
+/*.dbg
+/*.dproj.local
+/*.identcache
+/*.log
+/__history/
+/__recovery/
